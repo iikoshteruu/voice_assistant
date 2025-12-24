@@ -382,9 +382,9 @@ async def process_voice(
                 # Include results with score > 0.3
                 relevant = [r for r in rag_results if r['score'] > 0.3]
                 if relevant:
-                    rag_context = "\n\nRelevant context from your knowledge base:\n" + "\n".join(
+                    rag_context = "\n\n---\nUSE THE FOLLOWING CONTEXT TO ANSWER THE USER'S QUESTION. If the answer is in the context, use it. Only say you don't have information if the context truly doesn't contain relevant data.\n\nCONTEXT:\n" + "\n".join(
                         [f"- {r['content']}" for r in relevant]
-                    )
+                    ) + "\n---"
                 logger.info(f"RAG found {len(rag_results)} results, {len(relevant)} above threshold")
         except Exception as e:
             logger.error(f"RAG search error: {e}")
