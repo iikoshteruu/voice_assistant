@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse, JSONResponse
 from pydantic_settings import BaseSettings
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
 from wyoming.tts import Synthesize, SynthesizeVoice
@@ -461,6 +461,22 @@ async def process_voice(
             "remember that ", "remember ", "note that ", "note ",
             "save this ", "save that ", "don't forget ", "keep in mind "
         ]
+        # Also detect personal facts to save automatically
+        fact_patterns = [
+            "my name is ", "i am ", "i'm ", "i work at ", "i work for ",
+            "my wife ", "my husband ", "my partner ", "my girlfriend ", "my boyfriend ",
+            "my birthday is ", "i live in ", "i'm from ", "my favorite ", "i like ", "i love ",
+            "my job is ", "my email is ", "my phone is ", "my address is "
+        ]
+        lower_transcript = transcript.lower()
+
+        # Check if this is a personal fact (save silently, don't return early)
+        for pattern in fact_patterns:
+            if pattern in lower_transcript:
+                await add_to_qdrant(transcript, source="user_fact", metadata={"type": "personal_info"})
+                logger.info(f"Personal fact saved: {transcript[:50]}...")
+                break
+
         for prefix in capture_prefixes:
             if transcript.lower().startswith(prefix):
                 # Extract the content to remember
@@ -762,6 +778,42 @@ async def weather_endpoint():
     if weather:
         return weather
     raise HTTPException(status_code=503, detail="Weather service unavailable")
+
+
+@app.get("/api/memories")
+async def get_memories(limit: int = 50):
+    """Get all saved memories and user facts."""
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Qdrant not available")
+
+    try:
+        # Scroll through points to get memories
+        results = qdrant.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=Filter(
+                should=[
+                    FieldCondition(key="source", match=MatchValue(value="memory")),
+                    FieldCondition(key="source", match=MatchValue(value="user_fact"))
+                ]
+            ),
+            limit=limit,
+            with_payload=True
+        )
+
+        memories = [
+            {
+                "content": point.payload.get("content", ""),
+                "source": point.payload.get("source", ""),
+                "type": point.payload.get("type", ""),
+                "timestamp": point.payload.get("timestamp", "")
+            }
+            for point in results[0]
+        ]
+
+        return {"memories": memories, "count": len(memories)}
+    except Exception as e:
+        logger.error(f"Failed to get memories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/static/icon-{size}.png")
