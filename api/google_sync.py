@@ -15,11 +15,11 @@ from googleapiclient.discovery import build
 logger = logging.getLogger(__name__)
 
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar",  # Full calendar access (read/write)
     "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",  # For sending emails
+    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/contacts.readonly",  # For contacts lookup
+    "https://www.googleapis.com/auth/contacts.readonly",
 ]
 
 CREDENTIALS_PATH = "/data/google_credentials.json"
@@ -98,6 +98,44 @@ def is_authenticated() -> bool:
     """Check if we have valid credentials."""
     creds = get_credentials()
     return creds is not None and creds.valid
+
+
+def create_calendar_event(summary: str, start_time: str, end_time: str = None, description: str = "") -> dict:
+    """Create a calendar event.
+
+    Args:
+        summary: Event title
+        start_time: ISO format datetime (e.g., "2025-12-26T14:00:00")
+        end_time: ISO format datetime (optional, defaults to 1 hour after start)
+        description: Event description
+    """
+    creds = get_credentials()
+    if not creds:
+        return {"error": "Not authenticated"}
+
+    try:
+        service = build("calendar", "v3", credentials=creds)
+
+        # Parse start time and create end time if not provided
+        from datetime import datetime, timedelta
+        start_dt = datetime.fromisoformat(start_time.replace("Z", ""))
+        if not end_time:
+            end_dt = start_dt + timedelta(hours=1)
+            end_time = end_dt.isoformat()
+
+        event = {
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start_time, "timeZone": "Asia/Tokyo"},
+            "end": {"dateTime": end_time, "timeZone": "Asia/Tokyo"},
+        }
+
+        created = service.events().insert(calendarId="primary", body=event).execute()
+        return {"success": True, "event_id": created["id"], "link": created.get("htmlLink")}
+
+    except Exception as e:
+        logger.error(f"Calendar event creation failed: {e}")
+        return {"error": str(e)}
 
 
 async def sync_calendar(add_to_qdrant_func, days_ahead: int = 14) -> dict:

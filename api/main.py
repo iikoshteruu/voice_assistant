@@ -604,7 +604,84 @@ async def process_voice(
                     )
                 break
 
-        # Step 1c: Check for todo list commands
+        # Step 1c: Check for calendar scheduling
+        schedule_patterns = ["schedule ", "add to my calendar", "create an event", "set up a meeting", "book "]
+        if any(pattern in lower_transcript for pattern in schedule_patterns):
+            logger.info("Schedule request detected")
+
+            # Use LLM to parse the scheduling request
+            today = datetime.now().strftime("%Y-%m-%d")
+            parse_prompt = f"""Extract calendar event details from this request. Today is {today}.
+Return ONLY a JSON object with these fields (no other text):
+- summary: event title
+- date: YYYY-MM-DD format
+- time: HH:MM in 24-hour format
+- duration_hours: number (default 1)
+
+Request: {transcript}
+
+JSON:"""
+
+            try:
+                parsed = await query_ollama(parse_prompt, [], "You are a JSON parser. Return only valid JSON, no explanation.")
+                # Try to extract JSON from response
+                import json as json_module
+                import re
+                json_match = re.search(r'\{[^}]+\}', parsed)
+                if json_match:
+                    event_data = json_module.loads(json_match.group())
+                    start_time = f"{event_data['date']}T{event_data['time']}:00"
+
+                    result = google_sync.create_calendar_event(
+                        summary=event_data.get('summary', 'Event'),
+                        start_time=start_time
+                    )
+
+                    if result.get("success"):
+                        response_text = f"Scheduled '{event_data.get('summary')}' for {event_data['date']} at {event_data['time']}."
+                    else:
+                        response_text = f"Couldn't create event: {result.get('error', 'unknown error')}"
+                else:
+                    response_text = "I couldn't understand the scheduling details. Try saying 'schedule lunch tomorrow at noon'."
+            except Exception as e:
+                logger.error(f"Schedule parse error: {e}")
+                response_text = "I had trouble parsing that. Try 'schedule meeting tomorrow at 2pm'."
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Step 1c-2: Check for voice note command
+        if any(x in lower_transcript for x in ["take a voice note", "save voice note", "record a note", "voice memo"]):
+            # Save the audio and transcript
+            note_dir = "/data/voice_notes"
+            os.makedirs(note_dir, exist_ok=True)
+
+            note_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            audio_path = f"{note_dir}/{note_id}.wav"
+            text_path = f"{note_dir}/{note_id}.txt"
+
+            # Save audio
+            with open(audio_path, "wb") as f:
+                f.write(audio_bytes)
+
+            # Save transcript (remove the command prefix)
+            note_content = transcript
+            for prefix in ["take a voice note", "save voice note", "record a note", "voice memo"]:
+                note_content = note_content.lower().replace(prefix, "").strip()
+            note_content = note_content.strip(": ").strip() or transcript
+
+            with open(text_path, "w") as f:
+                f.write(note_content)
+
+            response_text = "Voice note saved."
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Step 1c-2: Check for todo list commands
         if any(x in lower_transcript for x in ["add to my list", "add to my todo", "add to list", "to my shopping list", "to my to do"]):
             # Extract the item
             for pattern in ["add ", "list ", "todo "]:
@@ -1100,6 +1177,13 @@ async def google_auth_callback(code: str = None, error: str = None):
     return HTMLResponse("<h1>Error</h1><p>Authentication failed</p>")
 
 
+@app.post("/api/google/calendar/create")
+async def create_calendar_event(summary: str, start_time: str, end_time: str = None, description: str = ""):
+    """Create a calendar event."""
+    result = google_sync.create_calendar_event(summary, start_time, end_time, description)
+    return result
+
+
 @app.post("/api/google/sync/calendar")
 async def sync_google_calendar():
     """Sync Google Calendar to knowledge base."""
@@ -1209,6 +1293,32 @@ async def weather_endpoint():
     if weather:
         return weather
     raise HTTPException(status_code=503, detail="Weather service unavailable")
+
+
+@app.get("/api/voice-notes")
+async def get_voice_notes():
+    """Get list of voice notes."""
+    note_dir = "/data/voice_notes"
+    notes = []
+    if os.path.exists(note_dir):
+        for f in sorted(os.listdir(note_dir), reverse=True):
+            if f.endswith(".txt"):
+                note_id = f.replace(".txt", "")
+                text_path = f"{note_dir}/{f}"
+                with open(text_path, "r") as tf:
+                    content = tf.read()
+                notes.append({"id": note_id, "content": content, "has_audio": os.path.exists(f"{note_dir}/{note_id}.wav")})
+    return {"notes": notes}
+
+
+@app.get("/api/voice-notes/{note_id}/audio")
+async def get_voice_note_audio(note_id: str):
+    """Get voice note audio file."""
+    audio_path = f"/data/voice_notes/{note_id}.wav"
+    if os.path.exists(audio_path):
+        with open(audio_path, "rb") as f:
+            return Response(content=f.read(), media_type="audio/wav")
+    raise HTTPException(status_code=404, detail="Voice note not found")
 
 
 @app.get("/api/todos")
