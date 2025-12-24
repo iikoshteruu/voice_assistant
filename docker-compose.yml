@@ -52,6 +52,10 @@ services:
       - WEATHER_LAT=34.0522
       - WEATHER_LON=-118.2437
       - WEATHER_TIMEZONE=America/Los_Angeles
+      # Twilio SMS (optional - uncomment and fill in to enable)
+      # - TWILIO_ACCOUNT_SID=your_account_sid
+      # - TWILIO_AUTH_TOKEN=your_auth_token
+      # - TWILIO_FROM_NUMBER=+1234567890
     depends_on:
       - faster-whisper
       - piper

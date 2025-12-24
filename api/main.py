@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     weather_lat: float = 34.0522
     weather_lon: float = -118.2437
     weather_timezone: str = "America/Los_Angeles"
+    # Twilio for SMS (optional)
+    twilio_account_sid: Optional[str] = None
+    twilio_auth_token: Optional[str] = None
+    twilio_from_number: Optional[str] = None
     system_prompt: str = """You are Socrates, a wise and thoughtful voice assistant.
 You engage users with curiosity and help them think deeply about their questions.
 Keep responses concise (1-3 sentences) unless more detail is requested.
@@ -891,13 +895,43 @@ async def send_email(to: str, subject: str, body: str):
     return result
 
 
+@app.post("/api/sms/send")
+async def send_sms(to: str, message: str):
+    """Send an SMS via Twilio."""
+    if not all([settings.twilio_account_sid, settings.twilio_auth_token, settings.twilio_from_number]):
+        raise HTTPException(status_code=503, detail="Twilio not configured")
+
+    try:
+        from twilio.rest import Client
+        client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+
+        msg = client.messages.create(
+            body=message,
+            from_=settings.twilio_from_number,
+            to=to
+        )
+
+        return {"success": True, "sid": msg.sid}
+    except Exception as e:
+        logger.error(f"SMS send failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sms/status")
+async def sms_status():
+    """Check if Twilio is configured."""
+    configured = all([settings.twilio_account_sid, settings.twilio_auth_token, settings.twilio_from_number])
+    return {"configured": configured}
+
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
     return {
         "status": "ok",
         "qdrant": qdrant is not None,
-        "google": google_sync.is_authenticated()
+        "google": google_sync.is_authenticated(),
+        "twilio": all([settings.twilio_account_sid, settings.twilio_auth_token, settings.twilio_from_number])
     }
 
 
