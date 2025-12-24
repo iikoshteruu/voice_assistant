@@ -15,6 +15,8 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse, JSONResponse
 from pydantic_settings import BaseSettings
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
 from wyoming.tts import Synthesize
@@ -27,11 +29,16 @@ class Settings(BaseSettings):
     whisper_url: str = "http://faster-whisper:8000"
     ollama_url: str = "http://ollama:11434"
     ollama_model: str = "mistral"
+    ollama_embed_model: str = "nomic-embed-text"
     piper_host: str = "piper"
     piper_port: int = 10200
     max_history: int = 20
     session_timeout_minutes: int = 30
     db_path: str = "/data/socrates.db"
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "socrates"
+    rag_enabled: bool = True
+    rag_top_k: int = 3
     system_prompt: str = """You are Socrates, a wise and thoughtful voice assistant.
 You engage users with curiosity and help them think deeply about their questions.
 Keep responses concise (1-3 sentences) unless more detail is requested.
@@ -41,6 +48,7 @@ Be warm, insightful, and occasionally use gentle humor."""
 settings = Settings()
 http_client: Optional[httpx.AsyncClient] = None
 db: Optional[aiosqlite.Connection] = None
+qdrant: Optional[QdrantClient] = None
 
 # Session storage for conversation memory
 sessions: dict[str, dict] = {}
@@ -73,11 +81,87 @@ async def init_db():
     await db.commit()
 
 
+def init_qdrant():
+    """Initialize Qdrant client and collection."""
+    global qdrant
+    try:
+        qdrant = QdrantClient(url=settings.qdrant_url)
+
+        # Check if collection exists, create if not
+        collections = qdrant.get_collections().collections
+        exists = any(c.name == settings.qdrant_collection for c in collections)
+
+        if not exists:
+            qdrant.create_collection(
+                collection_name=settings.qdrant_collection,
+                vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+            )
+            logger.info(f"Created Qdrant collection: {settings.qdrant_collection}")
+        else:
+            logger.info(f"Qdrant collection exists: {settings.qdrant_collection}")
+    except Exception as e:
+        logger.warning(f"Qdrant initialization failed: {e}. RAG disabled.")
+        qdrant = None
+
+
+async def get_embedding(text: str) -> list[float]:
+    """Get embedding from Ollama."""
+    response = await http_client.post(
+        f"{settings.ollama_url}/api/embeddings",
+        json={"model": settings.ollama_embed_model, "prompt": text}
+    )
+    if response.status_code != 200:
+        raise Exception(f"Embedding failed: {response.text}")
+    return response.json()["embedding"]
+
+
+async def rag_search(query: str, top_k: int = None) -> list[dict]:
+    """Search Qdrant for relevant context."""
+    if not qdrant or not settings.rag_enabled:
+        return []
+
+    try:
+        embedding = await get_embedding(query)
+        results = qdrant.search(
+            collection_name=settings.qdrant_collection,
+            query_vector=embedding,
+            limit=top_k or settings.rag_top_k
+        )
+        return [
+            {"content": hit.payload.get("content", ""), "score": hit.score, "source": hit.payload.get("source", "")}
+            for hit in results
+        ]
+    except Exception as e:
+        logger.error(f"RAG search failed: {e}")
+        return []
+
+
+async def add_to_qdrant(content: str, source: str, metadata: dict = None):
+    """Add content to Qdrant for future retrieval."""
+    if not qdrant:
+        return
+
+    try:
+        embedding = await get_embedding(content)
+        point_id = str(uuid.uuid4())
+        payload = {"content": content, "source": source, "timestamp": datetime.now().isoformat()}
+        if metadata:
+            payload.update(metadata)
+
+        qdrant.upsert(
+            collection_name=settings.qdrant_collection,
+            points=[PointStruct(id=point_id, vector=embedding, payload=payload)]
+        )
+    except Exception as e:
+        logger.error(f"Failed to add to Qdrant: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
     http_client = httpx.AsyncClient(timeout=300.0)  # 5 minute timeout
     await init_db()
+    init_qdrant()
     yield
     await http_client.aclose()
     if db:
@@ -288,9 +372,23 @@ async def process_voice(
         if not transcript.strip():
             raise HTTPException(status_code=400, detail="Could not transcribe audio")
 
-        # Step 2: Query Ollama with conversation history
+        # Step 2: RAG search for context
+        rag_context = ""
+        try:
+            rag_results = await rag_search(transcript)
+            if rag_results:
+                rag_context = "\n\nRelevant context from your knowledge base:\n" + "\n".join(
+                    [f"- {r['content']}" for r in rag_results if r['score'] > 0.5]
+                )
+                logger.info(f"RAG found {len(rag_results)} results")
+        except Exception as e:
+            logger.error(f"RAG search error: {e}")
+
+        # Step 3: Query Ollama with conversation history
         try:
             system_prompt = x_personality if x_personality else settings.system_prompt
+            if rag_context:
+                system_prompt += rag_context
             logger.info(f"Using personality: {system_prompt[:50]}...")
             response_text = await query_ollama(transcript, history, system_prompt)
             logger.info(f"Ollama response: {response_text[:200]}...")
@@ -417,10 +515,27 @@ async def delete_conversation(conversation_id: str):
     return {"status": "deleted"}
 
 
+@app.post("/api/knowledge")
+async def add_knowledge(content: str, source: str = "manual"):
+    """Add content to the knowledge base."""
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Qdrant not available")
+
+    await add_to_qdrant(content, source)
+    return {"status": "added", "source": source}
+
+
+@app.get("/api/knowledge/search")
+async def search_knowledge(q: str, limit: int = 5):
+    """Search the knowledge base."""
+    results = await rag_search(q, top_k=limit)
+    return {"results": results}
+
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok"}
+    return {"status": "ok", "qdrant": qdrant is not None}
 
 
 @app.get("/static/icon-{size}.png")

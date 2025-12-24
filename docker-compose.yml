@@ -43,8 +43,11 @@ services:
       - WHISPER_URL=http://faster-whisper:8000
       - OLLAMA_URL=http://192.168.76.242:30068
       - OLLAMA_MODEL=llama3.2:3b
+      - OLLAMA_EMBED_MODEL=nomic-embed-text
       - PIPER_HOST=piper
       - PIPER_PORT=10200
+      - QDRANT_URL=http://192.168.76.242:6333
+      - QDRANT_COLLECTION=socrates
     depends_on:
       - faster-whisper
       - piper
