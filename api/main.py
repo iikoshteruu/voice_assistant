@@ -10,6 +10,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse, JSONResponse
 from pydantic_settings import BaseSettings
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
@@ -50,6 +51,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Socrates API", lifespan=lifespan)
+
+# CORS middleware to allow custom headers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Session-Id", "X-Transcript", "X-Response-Text"],
+)
 
 
 def get_or_create_session(session_id: Optional[str]) -> tuple[str, list]:
@@ -214,6 +225,7 @@ async def process_voice(
         # Step 2: Query Ollama with conversation history
         try:
             system_prompt = x_personality if x_personality else settings.system_prompt
+            logger.info(f"Using personality: {system_prompt[:50]}...")
             response_text = await query_ollama(transcript, history, system_prompt)
             logger.info(f"Ollama response: {response_text[:200]}...")
         except Exception as e:
