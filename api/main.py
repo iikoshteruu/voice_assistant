@@ -286,45 +286,80 @@ async def health_check():
 
 @app.get("/static/icon-{size}.png")
 async def serve_icon(size: int):
-    """Generate a simple app icon."""
+    """Generate app icon with S design."""
     import struct
     import zlib
+    import math
 
-    # Create a simple colored square icon
     width = height = size
+    center = size // 2
+    radius = int(size * 0.45)
 
-    def create_png(w, h, color):
+    def create_png_rgba(w, h, pixels):
         def chunk(chunk_type, data):
             chunk_len = len(data)
             chunk_data = chunk_type + data
             checksum = zlib.crc32(chunk_data) & 0xffffffff
             return struct.pack('>I', chunk_len) + chunk_data + struct.pack('>I', checksum)
 
-        # PNG signature
         sig = b'\x89PNG\r\n\x1a\n'
-
-        # IHDR chunk
-        ihdr_data = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+        ihdr_data = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)  # 8-bit RGBA
         ihdr = chunk(b'IHDR', ihdr_data)
 
-        # IDAT chunk - raw pixel data
         raw_data = b''
-        for _ in range(h):
-            raw_data += b'\x00'  # filter byte
-            for _ in range(w):
-                raw_data += bytes(color)
+        for row in pixels:
+            raw_data += b'\x00'
+            for pixel in row:
+                raw_data += bytes(pixel)
 
-        compressed = zlib.compress(raw_data)
+        compressed = zlib.compress(raw_data, 9)
         idat = chunk(b'IDAT', compressed)
-
-        # IEND chunk
         iend = chunk(b'IEND', b'')
 
         return sig + ihdr + idat + iend
 
-    # Dark blue color matching the UI
-    png_data = create_png(width, height, [37, 99, 235])  # #2563eb
+    # Create pixel array
+    pixels = []
+    blue = [37, 99, 235, 255]
+    white = [255, 255, 255, 255]
 
+    for y in range(height):
+        row = []
+        for x in range(width):
+            # Distance from center
+            dx = x - center
+            dy = y - center
+            dist = math.sqrt(dx*dx + dy*dy)
+
+            if dist <= radius:
+                # Inside circle - check if we're drawing the S
+                # Normalize coordinates to -1 to 1
+                nx = dx / radius
+                ny = dy / radius
+
+                # Simple S shape using sine curve
+                is_s = False
+                s_width = 0.35
+
+                # S curve: x = sin(y * pi) * 0.4
+                target_x = math.sin(ny * math.pi) * 0.4
+
+                if abs(nx - target_x) < s_width:
+                    is_s = True
+
+                # Top and bottom caps
+                if ny < -0.6 and nx > target_x - s_width and nx < 0.5:
+                    is_s = True
+                if ny > 0.6 and nx < target_x + s_width and nx > -0.5:
+                    is_s = True
+
+                row.append(white if is_s else blue)
+            else:
+                row.append([255, 255, 255, 0])  # Transparent outside
+
+        pixels.append(row)
+
+    png_data = create_png_rgba(width, height, pixels)
     return Response(content=png_data, media_type="image/png")
 
 

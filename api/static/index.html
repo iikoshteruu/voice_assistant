@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="apple-mobile-web-app-title" content="Socrates">
-    <meta name="theme-color" content="#0a0a0a">
+    <meta name="theme-color" content="#ffffff">
     <link rel="apple-touch-icon" href="/static/icon-192.png">
     <link rel="manifest" href="/static/manifest.json">
     <title>Socrates</title>
@@ -18,8 +18,8 @@
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0a0a0a;
-            color: #e0e0e0;
+            background: #f5f5f7;
+            color: #1d1d1f;
             margin: 0;
             padding: 20px;
             min-height: 100vh;
@@ -40,31 +40,34 @@
             text-align: center;
             font-size: 1.5rem;
             margin-bottom: 20px;
-            color: #fff;
+            color: #1d1d1f;
+            font-weight: 600;
         }
 
         .status {
             text-align: center;
             padding: 10px;
-            border-radius: 8px;
+            border-radius: 10px;
             margin-bottom: 20px;
             font-size: 0.9rem;
-            background: #1a1a1a;
+            background: #ffffff;
+            color: #86868b;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
 
         .status.listening {
-            background: #1a2f1a;
-            color: #4ade80;
+            background: #d1fae5;
+            color: #065f46;
         }
 
         .status.processing {
-            background: #2f2f1a;
-            color: #facc15;
+            background: #fef3c7;
+            color: #92400e;
         }
 
         .status.error {
-            background: #2f1a1a;
-            color: #f87171;
+            background: #fee2e2;
+            color: #991b1b;
         }
 
         .conversation {
@@ -72,15 +75,16 @@
             overflow-y: auto;
             margin-bottom: 20px;
             padding: 10px;
-            background: #111;
-            border-radius: 12px;
+            background: #ffffff;
+            border-radius: 16px;
             min-height: 200px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
 
         .message {
             padding: 12px 16px;
             margin: 8px 0;
-            border-radius: 12px;
+            border-radius: 16px;
             max-width: 85%;
         }
 
@@ -91,13 +95,13 @@
         }
 
         .message.assistant {
-            background: #262626;
-            color: #e0e0e0;
+            background: #e5e5ea;
+            color: #1d1d1f;
         }
 
         .message .label {
             font-size: 0.7rem;
-            opacity: 0.7;
+            opacity: 0.6;
             margin-bottom: 4px;
             text-transform: uppercase;
         }
@@ -112,19 +116,19 @@
 
         #clearBtn {
             padding: 12px 20px;
-            border-radius: 8px;
-            border: 1px solid #333;
-            background: #1a1a1a;
-            color: #888;
+            border-radius: 10px;
+            border: none;
+            background: #ffffff;
+            color: #86868b;
             font-size: 0.85rem;
             cursor: pointer;
             transition: all 0.2s;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
 
         #clearBtn:hover {
-            background: #262626;
-            color: #fff;
-            border-color: #444;
+            background: #f0f0f0;
+            color: #1d1d1f;
         }
 
         #recordBtn {
@@ -138,7 +142,7 @@
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s;
-            box-shadow: 0 4px 20px rgba(37, 99, 235, 0.4);
+            box-shadow: 0 4px 25px rgba(37, 99, 235, 0.35);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -147,11 +151,11 @@
         #recordBtn:active, #recordBtn.recording {
             transform: scale(0.95);
             background: linear-gradient(145deg, #dc2626, #b91c1c);
-            box-shadow: 0 4px 20px rgba(220, 38, 38, 0.4);
+            box-shadow: 0 4px 25px rgba(220, 38, 38, 0.35);
         }
 
         #recordBtn:disabled {
-            background: #333;
+            background: #d1d1d6;
             cursor: not-allowed;
             box-shadow: none;
         }
@@ -169,36 +173,38 @@
 
         .personality-bar select {
             padding: 10px 20px;
-            background: linear-gradient(145deg, #1a1a1a, #0d0d0d);
-            border: 1px solid #333;
+            background: #ffffff;
+            border: none;
             border-radius: 20px;
-            color: #e0e0e0;
+            color: #1d1d1f;
             font-size: 0.9rem;
             cursor: pointer;
             appearance: none;
             -webkit-appearance: none;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23888' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2386868b' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 12px center;
             padding-right: 35px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
 
         .personality-bar select:focus {
             outline: none;
-            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.3);
         }
 
         .settings {
             margin-top: auto;
             padding: 15px;
-            background: #111;
+            background: #ffffff;
             border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
 
         .settings summary {
             cursor: pointer;
             font-size: 0.9rem;
-            color: #888;
+            color: #86868b;
         }
 
         .settings-content {
@@ -208,17 +214,17 @@
         .settings label {
             display: block;
             font-size: 0.8rem;
-            color: #888;
+            color: #86868b;
             margin-bottom: 5px;
         }
 
         .settings input, .settings select {
             width: 100%;
             padding: 10px;
-            background: #1a1a1a;
-            border: 1px solid #333;
-            border-radius: 6px;
-            color: #fff;
+            background: #f5f5f7;
+            border: 1px solid #e5e5e5;
+            border-radius: 8px;
+            color: #1d1d1f;
             font-size: 1rem;
             margin-bottom: 10px;
         }
