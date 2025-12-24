@@ -1,8 +1,10 @@
 """Google API sync for Calendar, Gmail, and Sheets."""
+import base64
 import json
 import logging
 import os
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
 from typing import Optional
 
 from google.auth.transport.requests import Request
@@ -15,6 +17,7 @@ logger = logging.getLogger(__name__)
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",  # For sending emails
     "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 
@@ -228,4 +231,31 @@ async def sync_sheet(add_to_qdrant_func, spreadsheet_id: str, range_name: str = 
 
     except Exception as e:
         logger.error(f"Sheets sync failed: {e}")
+        return {"error": str(e)}
+
+
+def send_email(to: str, subject: str, body: str) -> dict:
+    """Send an email via Gmail API."""
+    creds = get_credentials()
+    if not creds:
+        return {"error": "Not authenticated"}
+
+    try:
+        service = build("gmail", "v1", credentials=creds)
+
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+        sent = service.users().messages().send(
+            userId="me",
+            body={"raw": raw}
+        ).execute()
+
+        return {"success": True, "message_id": sent["id"]}
+
+    except Exception as e:
+        logger.error(f"Email send failed: {e}")
         return {"error": str(e)}

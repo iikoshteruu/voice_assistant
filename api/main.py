@@ -884,6 +884,13 @@ async def sync_google_sheet(spreadsheet_id: str, range_name: str = "A1:Z100"):
     return result
 
 
+@app.post("/api/google/send-email")
+async def send_email(to: str, subject: str, body: str):
+    """Send an email via Gmail."""
+    result = google_sync.send_email(to, subject, body)
+    return result
+
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
