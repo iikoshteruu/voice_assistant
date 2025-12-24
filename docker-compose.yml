@@ -48,10 +48,10 @@ services:
       - PIPER_PORT=10200
       - QDRANT_URL=http://192.168.76.242:6333
       - QDRANT_COLLECTION=socrates
-      # Weather location (default: Los Angeles)
-      - WEATHER_LAT=34.0522
-      - WEATHER_LON=-118.2437
-      - WEATHER_TIMEZONE=America/Los_Angeles
+      # Weather location: Ginoza Village, Okinawa, Japan
+      - WEATHER_LAT=26.4833
+      - WEATHER_LON=127.9833
+      - WEATHER_TIMEZONE=Asia/Tokyo
       # Twilio SMS (optional - uncomment and fill in to enable)
       # - TWILIO_ACCOUNT_SID=your_account_sid
       # - TWILIO_AUTH_TOKEN=your_auth_token
