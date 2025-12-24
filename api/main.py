@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     await http_client.aclose()
 
 
-app = FastAPI(title="Voice Assistant API", lifespan=lifespan)
+app = FastAPI(title="Socrates API", lifespan=lifespan)
 
 
 async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
