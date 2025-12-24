@@ -471,6 +471,16 @@ async def synthesize_speech_wyoming(text: str, voice: str = None) -> bytes:
         return b""
 
 
+def sanitize_header(value: str, max_len: int = 500) -> str:
+    """Sanitize a string for use in HTTP headers."""
+    # Remove newlines and control characters
+    clean = value.replace('\n', ' ').replace('\r', ' ')
+    # Remove other control characters
+    clean = ''.join(c if ord(c) >= 32 else ' ' for c in clean)
+    # Truncate
+    return clean[:max_len]
+
+
 def _create_wav(raw_audio: bytes, sample_rate: int, sample_width: int, channels: int) -> bytes:
     """Create a WAV file from raw PCM audio."""
     buffer = io.BytesIO()
@@ -564,7 +574,7 @@ async def process_voice(
                         media_type="audio/wav",
                         headers={
                             "X-Transcript": transcript,
-                            "X-Response-Text": response_text,
+                            "X-Response-Text": sanitize_header(response_text),
                             "X-Session-Id": session_id
                         }
                     )
@@ -610,7 +620,7 @@ async def process_voice(
                     media_type="audio/wav",
                     headers={
                         "X-Transcript": transcript,
-                        "X-Response-Text": response_text,
+                        "X-Response-Text": sanitize_header(response_text),
                         "X-Session-Id": session_id
                     }
                 )
@@ -647,7 +657,7 @@ async def process_voice(
                     media_type="audio/wav",
                     headers={
                         "X-Transcript": transcript,
-                        "X-Response-Text": response_text,
+                        "X-Response-Text": sanitize_header(response_text),
                         "X-Session-Id": session_id
                     }
                 )
@@ -723,7 +733,7 @@ async def process_voice(
             media_type="audio/wav",
             headers={
                 "X-Transcript": transcript,
-                "X-Response-Text": response_text[:500],
+                "X-Response-Text": sanitize_header(response_text),
                 "X-Session-Id": session_id
             }
         )
