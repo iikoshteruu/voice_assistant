@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import os
 import traceback
 import uuid
 import wave
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Optional
 
+import aiosqlite
 import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +31,7 @@ class Settings(BaseSettings):
     piper_port: int = 10200
     max_history: int = 20
     session_timeout_minutes: int = 30
+    db_path: str = "/data/socrates.db"
     system_prompt: str = """You are Socrates, a wise and thoughtful voice assistant.
 You engage users with curiosity and help them think deeply about their questions.
 Keep responses concise (1-3 sentences) unless more detail is requested.
@@ -37,17 +40,48 @@ Be warm, insightful, and occasionally use gentle humor."""
 
 settings = Settings()
 http_client: Optional[httpx.AsyncClient] = None
+db: Optional[aiosqlite.Connection] = None
 
 # Session storage for conversation memory
 sessions: dict[str, dict] = {}
+
+
+async def init_db():
+    """Initialize SQLite database."""
+    global db
+    os.makedirs(os.path.dirname(settings.db_path), exist_ok=True)
+    db = await aiosqlite.connect(settings.db_path)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            personality TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT,
+            role TEXT,
+            content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+        )
+    """)
+    await db.commit()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
     http_client = httpx.AsyncClient(timeout=300.0)  # 5 minute timeout
+    await init_db()
     yield
     await http_client.aclose()
+    if db:
+        await db.close()
 
 
 app = FastAPI(title="Socrates API", lifespan=lifespan)
@@ -61,6 +95,38 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Session-Id", "X-Transcript", "X-Response-Text"],
 )
+
+
+async def save_message(conversation_id: str, role: str, content: str):
+    """Save a message to the database."""
+    await db.execute(
+        "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+        (conversation_id, role, content)
+    )
+    await db.execute(
+        "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (conversation_id,)
+    )
+    await db.commit()
+
+
+async def create_conversation(conversation_id: str, title: str, personality: str):
+    """Create a new conversation in the database."""
+    await db.execute(
+        "INSERT INTO conversations (id, title, personality) VALUES (?, ?, ?)",
+        (conversation_id, title, personality)
+    )
+    await db.commit()
+
+
+async def get_conversation_messages(conversation_id: str) -> list:
+    """Get all messages for a conversation."""
+    cursor = await db.execute(
+        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at",
+        (conversation_id,)
+    )
+    rows = await cursor.fetchall()
+    return [{"role": row[0], "content": row[1]} for row in rows]
 
 
 def get_or_create_session(session_id: Optional[str]) -> tuple[str, list]:
@@ -232,8 +298,19 @@ async def process_voice(
             logger.error(f"Ollama failed: {e}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Ollama failed: {str(e)}")
 
-        # Save to conversation history
+        # Save to conversation history (memory)
         add_to_history(session_id, transcript, response_text)
+
+        # Save to database
+        # Check if this is a new conversation
+        cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+        if not await cursor.fetchone():
+            # Create new conversation with first user message as title
+            title = transcript[:50] + "..." if len(transcript) > 50 else transcript
+            await create_conversation(session_id, title, system_prompt[:50])
+
+        await save_message(session_id, "user", transcript)
+        await save_message(session_id, "assistant", response_text)
 
         # Step 3: Synthesize speech
         try:
@@ -288,6 +365,56 @@ async def clear_session(x_session_id: Optional[str] = Header(None)):
         sessions[x_session_id]["history"] = []
         return {"status": "cleared", "session_id": x_session_id}
     return {"status": "no_session"}
+
+
+@app.get("/api/conversations")
+async def list_conversations():
+    """List all saved conversations."""
+    cursor = await db.execute(
+        "SELECT id, title, personality, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 50"
+    )
+    rows = await cursor.fetchall()
+    return {
+        "conversations": [
+            {
+                "id": row[0],
+                "title": row[1],
+                "personality": row[2],
+                "created_at": row[3],
+                "updated_at": row[4]
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    """Get a specific conversation with messages."""
+    cursor = await db.execute(
+        "SELECT id, title, personality FROM conversations WHERE id = ?",
+        (conversation_id,)
+    )
+    conv = await cursor.fetchone()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    messages = await get_conversation_messages(conversation_id)
+    return {
+        "id": conv[0],
+        "title": conv[1],
+        "personality": conv[2],
+        "messages": messages
+    }
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """Delete a conversation."""
+    await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+    await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+    await db.commit()
+    return {"status": "deleted"}
 
 
 @app.get("/api/health")

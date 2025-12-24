@@ -229,6 +229,117 @@
             margin-bottom: 10px;
         }
 
+        .history-panel {
+            position: fixed;
+            top: 0;
+            left: -300px;
+            width: 300px;
+            height: 100%;
+            background: #ffffff;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+            transition: left 0.3s ease;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .history-panel.open {
+            left: 0;
+        }
+
+        .history-header {
+            padding: 20px;
+            border-bottom: 1px solid #e5e5e5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .history-header h2 {
+            margin: 0;
+            font-size: 1.1rem;
+            color: #1d1d1f;
+        }
+
+        .history-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #86868b;
+        }
+
+        .history-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .history-item {
+            padding: 12px;
+            border-radius: 10px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            background: #f5f5f7;
+            transition: background 0.2s;
+        }
+
+        .history-item:hover {
+            background: #e5e5ea;
+        }
+
+        .history-item-title {
+            font-size: 0.9rem;
+            color: #1d1d1f;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .history-item-meta {
+            font-size: 0.75rem;
+            color: #86868b;
+        }
+
+        .history-item-delete {
+            float: right;
+            background: none;
+            border: none;
+            color: #ff3b30;
+            cursor: pointer;
+            font-size: 0.8rem;
+            padding: 2px 6px;
+        }
+
+        #historyBtn {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: #ffffff;
+            border: none;
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            z-index: 100;
+        }
+
+        .history-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.3);
+            z-index: 999;
+            display: none;
+        }
+
+        .history-overlay.open {
+            display: block;
+        }
+
         /* PWA standalone mode adjustments */
         @media (display-mode: standalone) {
             body {
@@ -250,6 +361,25 @@
     </style>
 </head>
 <body>
+    <button id="historyBtn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#1d1d1f" stroke-width="2">
+            <path d="M12 8v4l3 3"/>
+            <circle cx="12" cy="12" r="10"/>
+        </svg>
+    </button>
+
+    <div class="history-overlay" id="historyOverlay"></div>
+
+    <div class="history-panel" id="historyPanel">
+        <div class="history-header">
+            <h2>History</h2>
+            <button class="history-close" id="historyClose">&times;</button>
+        </div>
+        <div class="history-list" id="historyList">
+            <div style="text-align:center;color:#86868b;padding:20px;">Loading...</div>
+        </div>
+    </div>
+
     <div class="container">
         <h1>Socrates</h1>
 
@@ -295,6 +425,11 @@
         const conversationEl = document.getElementById('conversation');
         const serverUrlInput = document.getElementById('serverUrl');
         const personalitySelect = document.getElementById('personality');
+        const historyBtn = document.getElementById('historyBtn');
+        const historyPanel = document.getElementById('historyPanel');
+        const historyOverlay = document.getElementById('historyOverlay');
+        const historyClose = document.getElementById('historyClose');
+        const historyList = document.getElementById('historyList');
 
         let mediaRecorder = null;
         let audioChunks = [];
@@ -514,6 +649,87 @@
                 stopRecording();
             }
         });
+
+        // History panel functions
+        function openHistory() {
+            historyPanel.classList.add('open');
+            historyOverlay.classList.add('open');
+            loadConversations();
+        }
+
+        function closeHistory() {
+            historyPanel.classList.remove('open');
+            historyOverlay.classList.remove('open');
+        }
+
+        async function loadConversations() {
+            try {
+                const response = await fetch(`${getServerUrl()}/api/conversations`);
+                const data = await response.json();
+
+                if (data.conversations.length === 0) {
+                    historyList.innerHTML = '<div style="text-align:center;color:#86868b;padding:20px;">No conversations yet</div>';
+                    return;
+                }
+
+                historyList.innerHTML = data.conversations.map(conv => `
+                    <div class="history-item" data-id="${conv.id}">
+                        <button class="history-item-delete" onclick="deleteConversation('${conv.id}', event)">Delete</button>
+                        <div class="history-item-title">${conv.title}</div>
+                        <div class="history-item-meta">${new Date(conv.updated_at).toLocaleDateString()}</div>
+                    </div>
+                `).join('');
+
+                // Add click handlers
+                document.querySelectorAll('.history-item').forEach(item => {
+                    item.addEventListener('click', (e) => {
+                        if (!e.target.classList.contains('history-item-delete')) {
+                            loadConversation(item.dataset.id);
+                        }
+                    });
+                });
+            } catch (err) {
+                historyList.innerHTML = '<div style="text-align:center;color:#ff3b30;padding:20px;">Failed to load</div>';
+            }
+        }
+
+        async function loadConversation(id) {
+            try {
+                const response = await fetch(`${getServerUrl()}/api/conversations/${id}`);
+                const data = await response.json();
+
+                // Clear current conversation
+                conversationEl.innerHTML = '';
+                sessionId = id;
+
+                // Load messages into view
+                data.messages.forEach(msg => {
+                    addMessage(msg.content, msg.role === 'user' ? 'user' : 'assistant');
+                });
+
+                closeHistory();
+                setStatus('Conversation loaded');
+                setTimeout(() => setStatus('Ready - Hold button to speak'), 2000);
+            } catch (err) {
+                console.error('Failed to load conversation:', err);
+            }
+        }
+
+        async function deleteConversation(id, event) {
+            event.stopPropagation();
+            if (!confirm('Delete this conversation?')) return;
+
+            try {
+                await fetch(`${getServerUrl()}/api/conversations/${id}`, { method: 'DELETE' });
+                loadConversations();
+            } catch (err) {
+                console.error('Failed to delete:', err);
+            }
+        }
+
+        historyBtn.addEventListener('click', openHistory);
+        historyClose.addEventListener('click', closeHistory);
+        historyOverlay.addEventListener('click', closeHistory);
     </script>
 </body>
 </html>

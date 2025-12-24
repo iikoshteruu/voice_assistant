@@ -37,6 +37,8 @@ services:
     restart: unless-stopped
     ports:
       - "8150:8000"
+    volumes:
+      - /mnt/Pool/configs/voice-assistant/data:/data
     environment:
       - WHISPER_URL=http://faster-whisper:8000
       - OLLAMA_URL=http://192.168.76.242:30068
