@@ -19,7 +19,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
-from wyoming.tts import Synthesize
+from wyoming.tts import Synthesize, SynthesizeVoice
 
 import google_sync
 
@@ -51,6 +51,30 @@ settings = Settings()
 http_client: Optional[httpx.AsyncClient] = None
 db: Optional[aiosqlite.Connection] = None
 qdrant: Optional[QdrantClient] = None
+
+# Personality definitions with prompts and voices
+PERSONALITIES = {
+    "socratic": {
+        "prompt": "You are Socrates. ALWAYS respond by asking a thought-provoking question that helps the user think deeper. Never just answer directly - guide them to discover the answer themselves through questions. Be curious and philosophical. Example: Instead of 'Yes you have a meeting at 3pm', say 'What might happen if you considered how this meeting serves your larger goals? I see you have one at 3pm.'",
+        "voice": "en_GB-alan-medium"  # British, thoughtful
+    },
+    "concise": {
+        "prompt": "You are a concise assistant. Give the shortest possible accurate answer. No fluff, no elaboration unless asked. One sentence max when possible.",
+        "voice": "en_US-lessac-medium"  # Clear, efficient
+    },
+    "critic": {
+        "prompt": "You are a brutally honest critic. Point out flaws, weaknesses, and problems directly. Don't sugarcoat. Be constructive but harsh. Challenge assumptions ruthlessly.",
+        "voice": "en_US-ryan-medium"  # Different male, harsher
+    },
+    "teacher": {
+        "prompt": "You are a patient teacher. Explain concepts clearly with examples. Break down complex ideas. Ask if clarification is needed. Encourage learning.",
+        "voice": "en_US-amy-medium"  # Female, patient
+    },
+    "creative": {
+        "prompt": "You are a creative and imaginative assistant. Think outside the box. Offer unusual perspectives and creative solutions. Be playful with language and ideas.",
+        "voice": "en_GB-alba-medium"  # Scottish, different
+    }
+}
 
 # Session storage for conversation memory
 sessions: dict[str, dict] = {}
@@ -296,10 +320,11 @@ async def query_ollama(text: str, conversation_history: list = None, system_prom
     return result.get("message", {}).get("content", "")
 
 
-async def synthesize_speech_wyoming(text: str) -> bytes:
+async def synthesize_speech_wyoming(text: str, voice: str = None) -> bytes:
     """Use Wyoming protocol to synthesize speech with Piper."""
     async with AsyncTcpClient(settings.piper_host, settings.piper_port) as client:
-        await client.write_event(Synthesize(text=text).event())
+        synth_voice = SynthesizeVoice(name=voice) if voice else None
+        await client.write_event(Synthesize(text=text, voice=synth_voice).event())
 
         audio_chunks = []
         audio_info = None
@@ -359,6 +384,10 @@ async def process_voice(
         # Get or create session for conversation memory
         session_id, history = get_or_create_session(x_session_id)
 
+        # Get personality config (x_personality is now the key, e.g. "socratic")
+        personality_key = x_personality if x_personality in PERSONALITIES else "socratic"
+        personality = PERSONALITIES[personality_key]
+
         # Read uploaded audio
         audio_bytes = await audio.read()
         logger.info(f"Received audio: {len(audio_bytes)} bytes, session: {session_id[:8]}...")
@@ -391,10 +420,10 @@ async def process_voice(
 
         # Step 3: Query Ollama with conversation history
         try:
-            system_prompt = x_personality if x_personality else settings.system_prompt
+            system_prompt = personality["prompt"]
             if rag_context:
                 system_prompt += rag_context
-            logger.info(f"Using personality: {system_prompt[:50]}...")
+            logger.info(f"Using personality: {personality_key}, voice: {personality['voice']}")
             response_text = await query_ollama(transcript, history, system_prompt)
             logger.info(f"Ollama response: {response_text[:200]}...")
         except Exception as e:
@@ -415,9 +444,9 @@ async def process_voice(
         await save_message(session_id, "user", transcript)
         await save_message(session_id, "assistant", response_text)
 
-        # Step 3: Synthesize speech
+        # Step 4: Synthesize speech with personality voice
         try:
-            response_audio = await synthesize_speech_wyoming(response_text)
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
             logger.info(f"TTS result: {len(response_audio)} bytes")
         except Exception as e:
             logger.error(f"TTS failed: {e}\n{traceback.format_exc()}")
@@ -603,6 +632,17 @@ async def health_check():
         "status": "ok",
         "qdrant": qdrant is not None,
         "google": google_sync.is_authenticated()
+    }
+
+
+@app.get("/api/personalities")
+async def list_personalities():
+    """List available personalities."""
+    return {
+        "personalities": [
+            {"key": key, "voice": p["voice"]}
+            for key, p in PERSONALITIES.items()
+        ]
     }
 
 

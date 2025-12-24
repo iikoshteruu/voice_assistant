@@ -436,18 +436,9 @@
         let isRecording = false;
         let sessionId = null;
 
-        // Personality prompts
-        const personalities = {
-            socratic: "You are Socrates. ALWAYS respond by asking a thought-provoking question that helps the user think deeper. Never just answer directly - guide them to discover the answer themselves through questions. Be curious and philosophical. Example: Instead of 'Yes you have a meeting at 3pm', say 'What might happen if you considered how this meeting serves your larger goals? I see you have one at 3pm.'",
-            concise: "You are a concise assistant. Give the shortest possible accurate answer. No fluff, no elaboration unless asked. One sentence max when possible.",
-            critic: "You are a brutally honest critic. Point out flaws, weaknesses, and problems directly. Don't sugarcoat. Be constructive but harsh. Challenge assumptions ruthlessly.",
-            teacher: "You are a patient teacher. Explain concepts clearly with examples. Break down complex ideas. Ask if clarification is needed. Encourage learning.",
-            creative: "You are a creative and imaginative assistant. Think outside the box. Offer unusual perspectives and creative solutions. Be playful with language and ideas."
-        };
-
         // Load saved personality
         const savedPersonality = localStorage.getItem('personality');
-        if (savedPersonality && personalities[savedPersonality]) {
+        if (savedPersonality) {
             personalitySelect.value = savedPersonality;
         }
         personalitySelect.addEventListener('change', () => {
@@ -555,7 +546,7 @@
                 formData.append('audio', audioBlob, 'recording.webm');
 
                 const headers = {
-                    'X-Personality': personalities[personalitySelect.value]
+                    'X-Personality': personalitySelect.value
                 };
                 if (sessionId) {
                     headers['X-Session-Id'] = sessionId;
