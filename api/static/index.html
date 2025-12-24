@@ -221,6 +221,10 @@
         let audioChunks = [];
         let isRecording = false;
 
+        // Pre-create audio element for Safari compatibility
+        const audioPlayer = new Audio();
+        audioPlayer.playsInline = true;
+
         // Load saved server URL
         serverUrlInput.value = localStorage.getItem('serverUrl') || '';
         serverUrlInput.addEventListener('change', () => {
@@ -255,6 +259,10 @@
 
         async function startRecording() {
             try {
+                // Unlock audio on user gesture for Safari
+                audioPlayer.play().catch(() => {});
+                audioPlayer.pause();
+
                 const stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: true,
@@ -336,10 +344,12 @@
                 // Play audio response
                 const audioData = await response.blob();
                 if (audioData.size > 0) {
-                    const audioUrl = URL.createObjectURL(audioData);
-                    const audio = new Audio(audioUrl);
-                    audio.play();
-                    audio.onended = () => URL.revokeObjectURL(audioUrl);
+                    // Revoke previous URL if exists
+                    if (audioPlayer.src && audioPlayer.src.startsWith('blob:')) {
+                        URL.revokeObjectURL(audioPlayer.src);
+                    }
+                    audioPlayer.src = URL.createObjectURL(audioData);
+                    audioPlayer.play().catch(err => console.error('Audio play failed:', err));
                 }
 
                 setStatus('Ready - Hold button to speak');
