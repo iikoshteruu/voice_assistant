@@ -112,6 +112,30 @@ async def init_db():
             FOREIGN KEY (conversation_id) REFERENCES conversations(id)
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item TEXT NOT NULL,
+            completed BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            amount REAL NOT NULL,
+            category TEXT,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS habits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit TEXT NOT NULL,
+            logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await db.commit()
 
 
@@ -580,7 +604,158 @@ async def process_voice(
                     )
                 break
 
-        # Step 1c: Check for send email command
+        # Step 1c: Check for todo list commands
+        if any(x in lower_transcript for x in ["add to my list", "add to my todo", "add to list", "to my shopping list", "to my to do"]):
+            # Extract the item
+            for pattern in ["add ", "list ", "todo "]:
+                if pattern in lower_transcript:
+                    item = lower_transcript.split(pattern, 1)[-1].strip()
+                    item = item.replace("to my list", "").replace("to my todo", "").replace("to my shopping list", "").strip()
+                    if item:
+                        await db.execute("INSERT INTO todos (item) VALUES (?)", (item,))
+                        await db.commit()
+                        response_text = f"Added '{item}' to your list."
+                        break
+            else:
+                response_text = "I couldn't understand what to add."
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        if any(x in lower_transcript for x in ["what's on my list", "read my list", "my todo list", "what's on my to do"]):
+            cursor = await db.execute("SELECT item FROM todos WHERE completed = FALSE ORDER BY created_at DESC LIMIT 10")
+            rows = await cursor.fetchall()
+            if rows:
+                items = [row[0] for row in rows]
+                response_text = f"You have {len(items)} items: " + ", ".join(items)
+            else:
+                response_text = "Your list is empty."
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Step 1c-2: Check for expense tracking
+        if any(x in lower_transcript for x in ["log expense", "spent ", "log $", "add expense"]):
+            import re
+            # Try to extract amount
+            amount_match = re.search(r'\$?(\d+(?:\.\d{2})?)', transcript)
+            if amount_match:
+                amount = float(amount_match.group(1))
+                # Extract description (everything after the amount)
+                desc = transcript.split(amount_match.group(0), 1)[-1].strip()
+                desc = desc.replace("on ", "").replace("for ", "").strip() or "misc"
+
+                await db.execute("INSERT INTO expenses (amount, description) VALUES (?, ?)", (amount, desc))
+                await db.commit()
+                response_text = f"Logged ${amount:.2f} for {desc}."
+            else:
+                response_text = "I couldn't understand the amount. Try saying 'log $50 for groceries'."
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Step 1c-3: Check for habit tracking
+        if any(x in lower_transcript for x in ["log workout", "log exercise", "i worked out", "i exercised", "log habit", "completed habit"]):
+            habit = "workout"
+            if "exercise" in lower_transcript:
+                habit = "exercise"
+            elif "meditation" in lower_transcript or "meditated" in lower_transcript:
+                habit = "meditation"
+            elif "reading" in lower_transcript or "read" in lower_transcript:
+                habit = "reading"
+
+            await db.execute("INSERT INTO habits (habit) VALUES (?)", (habit,))
+            await db.commit()
+            response_text = f"Logged {habit} for today. Keep it up!"
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Step 1c-4: Check for calculations/math
+        calc_patterns = [
+            "calculate ", "what's ", "what is ", "how much is ", "convert ",
+            "percent", "tip on", "divided by", "times ", "plus ", "minus ",
+            "usd", "yen", "dollars", "euros", "pounds"
+        ]
+        math_indicators = ["calculate", "percent", "tip", "%", "+", "-", "*", "/", "divided", "times", "plus", "minus", "convert", "usd", "yen", "euro", "dollar"]
+
+        if any(pattern in lower_transcript for pattern in calc_patterns):
+            if any(ind in lower_transcript for ind in math_indicators):
+                logger.info("Calculation request detected")
+                calc_prompt = f"""Answer this math or conversion question. Be precise and concise. Show the result clearly.
+
+Question: {transcript}"""
+
+                response_text = await query_ollama(calc_prompt, [], "You are a helpful calculator. Give direct, accurate answers.")
+                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+
+                add_to_history(session_id, transcript, response_text)
+
+                cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+                if not await cursor.fetchone():
+                    await create_conversation(session_id, "Calculation", personality_key)
+
+                await save_message(session_id, "user", transcript)
+                await save_message(session_id, "assistant", response_text)
+
+                return Response(
+                    content=response_audio,
+                    media_type="audio/wav",
+                    headers={
+                        "X-Transcript": transcript,
+                        "X-Response-Text": sanitize_header(response_text),
+                        "X-Session-Id": session_id
+                    }
+                )
+
+        # Step 1d: Check for translation requests
+        translation_patterns = [
+            "how do you say ", "how do i say ", "translate ", "what does ",
+            "what is ", "how to say ", "in japanese", "in english", "to japanese", "to english"
+        ]
+        if any(pattern in lower_transcript for pattern in translation_patterns):
+            # Check if it's actually a translation request
+            is_translation = ("japanese" in lower_transcript or "english" in lower_transcript or
+                            "translate" in lower_transcript or
+                            ("how do you say" in lower_transcript or "how do i say" in lower_transcript))
+
+            if is_translation:
+                logger.info("Translation request detected")
+                translation_prompt = f"""Translate or explain the following. If translating to Japanese, provide both the Japanese characters and romaji pronunciation. Be concise.
+
+Request: {transcript}"""
+
+                response_text = await query_ollama(translation_prompt, [], personality["prompt"])
+                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+
+                add_to_history(session_id, transcript, response_text)
+
+                cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+                if not await cursor.fetchone():
+                    await create_conversation(session_id, "Translation", personality_key)
+
+                await save_message(session_id, "user", transcript)
+                await save_message(session_id, "assistant", response_text)
+
+                return Response(
+                    content=response_audio,
+                    media_type="audio/wav",
+                    headers={
+                        "X-Transcript": transcript,
+                        "X-Response-Text": sanitize_header(response_text),
+                        "X-Session-Id": session_id
+                    }
+                )
+
+        # Step 1d: Check for send email command
         send_email_patterns = ["send email to ", "send an email to ", "email to ", "send a message to "]
         for pattern in send_email_patterns:
             if pattern in lower_transcript:
@@ -1034,6 +1209,76 @@ async def weather_endpoint():
     if weather:
         return weather
     raise HTTPException(status_code=503, detail="Weather service unavailable")
+
+
+@app.get("/api/todos")
+async def get_todos(include_completed: bool = False):
+    """Get todo list items."""
+    if include_completed:
+        cursor = await db.execute("SELECT id, item, completed, created_at FROM todos ORDER BY created_at DESC")
+    else:
+        cursor = await db.execute("SELECT id, item, completed, created_at FROM todos WHERE completed = FALSE ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    return {"todos": [{"id": r[0], "item": r[1], "completed": bool(r[2]), "created_at": r[3]} for r in rows]}
+
+
+@app.post("/api/todos")
+async def add_todo(item: str):
+    """Add a todo item."""
+    await db.execute("INSERT INTO todos (item) VALUES (?)", (item,))
+    await db.commit()
+    return {"status": "added", "item": item}
+
+
+@app.delete("/api/todos/{todo_id}")
+async def delete_todo(todo_id: int):
+    """Delete or complete a todo item."""
+    await db.execute("UPDATE todos SET completed = TRUE WHERE id = ?", (todo_id,))
+    await db.commit()
+    return {"status": "completed"}
+
+
+@app.get("/api/expenses")
+async def get_expenses(days: int = 30):
+    """Get recent expenses."""
+    cursor = await db.execute(
+        "SELECT id, amount, category, description, created_at FROM expenses WHERE created_at > datetime('now', ?) ORDER BY created_at DESC",
+        (f"-{days} days",)
+    )
+    rows = await cursor.fetchall()
+    total = sum(r[1] for r in rows)
+    return {
+        "expenses": [{"id": r[0], "amount": r[1], "category": r[2], "description": r[3], "created_at": r[4]} for r in rows],
+        "total": total,
+        "days": days
+    }
+
+
+@app.post("/api/expenses")
+async def add_expense(amount: float, description: str = "", category: str = ""):
+    """Add an expense."""
+    await db.execute("INSERT INTO expenses (amount, description, category) VALUES (?, ?, ?)", (amount, description, category))
+    await db.commit()
+    return {"status": "logged", "amount": amount}
+
+
+@app.get("/api/habits")
+async def get_habits(days: int = 30):
+    """Get habit log."""
+    cursor = await db.execute(
+        "SELECT habit, COUNT(*) as count FROM habits WHERE logged_at > datetime('now', ?) GROUP BY habit",
+        (f"-{days} days",)
+    )
+    rows = await cursor.fetchall()
+    return {"habits": {r[0]: r[1] for r in rows}, "days": days}
+
+
+@app.post("/api/habits")
+async def log_habit(habit: str):
+    """Log a habit."""
+    await db.execute("INSERT INTO habits (habit) VALUES (?)", (habit,))
+    await db.commit()
+    return {"status": "logged", "habit": habit}
 
 
 @app.get("/api/memories")
