@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     qdrant_collection: str = "socrates"
     rag_enabled: bool = True
     rag_top_k: int = 3
+    # Location for weather (default: Los Angeles)
+    weather_lat: float = 34.0522
+    weather_lon: float = -118.2437
+    weather_timezone: str = "America/Los_Angeles"
     system_prompt: str = """You are Socrates, a wise and thoughtful voice assistant.
 You engage users with curiosity and help them think deeply about their questions.
 Keep responses concise (1-3 sentences) unless more detail is requested.
@@ -160,6 +164,55 @@ async def rag_search(query: str, top_k: int = None) -> list[dict]:
     except Exception as e:
         logger.error(f"RAG search failed: {e}")
         return []
+
+
+async def get_weather() -> dict:
+    """Get current weather from Open-Meteo."""
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={settings.weather_lat}&longitude={settings.weather_lon}"
+            f"&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m"
+            f"&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max"
+            f"&temperature_unit=fahrenheit&wind_speed_unit=mph"
+            f"&timezone={settings.weather_timezone}&forecast_days=3"
+        )
+        response = await http_client.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            current = data.get("current", {})
+            daily = data.get("daily", {})
+
+            # Weather code descriptions
+            weather_codes = {
+                0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast",
+                45: "foggy", 48: "foggy", 51: "light drizzle", 53: "drizzle", 55: "heavy drizzle",
+                61: "light rain", 63: "rain", 65: "heavy rain", 71: "light snow", 73: "snow",
+                75: "heavy snow", 80: "light showers", 81: "showers", 82: "heavy showers",
+                95: "thunderstorm", 96: "thunderstorm with hail", 99: "severe thunderstorm"
+            }
+
+            return {
+                "current": {
+                    "temp": current.get("temperature_2m"),
+                    "humidity": current.get("relative_humidity_2m"),
+                    "wind": current.get("wind_speed_10m"),
+                    "condition": weather_codes.get(current.get("weather_code", 0), "unknown")
+                },
+                "forecast": [
+                    {
+                        "date": daily["time"][i],
+                        "high": daily["temperature_2m_max"][i],
+                        "low": daily["temperature_2m_min"][i],
+                        "condition": weather_codes.get(daily["weather_code"][i], "unknown"),
+                        "rain_chance": daily["precipitation_probability_max"][i]
+                    }
+                    for i in range(min(3, len(daily.get("time", []))))
+                ]
+            }
+    except Exception as e:
+        logger.error(f"Weather fetch failed: {e}")
+    return None
 
 
 async def add_to_qdrant(content: str, source: str, metadata: dict = None):
@@ -418,11 +471,28 @@ async def process_voice(
         except Exception as e:
             logger.error(f"RAG search error: {e}")
 
+        # Step 2b: Check for weather-related queries
+        weather_context = ""
+        weather_keywords = ["weather", "temperature", "forecast", "rain", "snow", "cold", "hot", "warm", "sunny", "cloudy"]
+        if any(kw in transcript.lower() for kw in weather_keywords):
+            weather = await get_weather()
+            if weather:
+                current = weather["current"]
+                forecast = weather["forecast"]
+                weather_context = f"\n\nCurrent weather: {current['temp']}°F, {current['condition']}, humidity {current['humidity']}%, wind {current['wind']} mph."
+                if forecast:
+                    weather_context += f" Today's forecast: high {forecast[0]['high']}°F, low {forecast[0]['low']}°F, {forecast[0]['condition']}, {forecast[0]['rain_chance']}% chance of rain."
+                    if len(forecast) > 1:
+                        weather_context += f" Tomorrow: high {forecast[1]['high']}°F, {forecast[1]['condition']}."
+                logger.info(f"Weather context added")
+
         # Step 3: Query Ollama with conversation history
         try:
             system_prompt = personality["prompt"]
             if rag_context:
                 system_prompt += rag_context
+            if weather_context:
+                system_prompt += weather_context
             logger.info(f"Using personality: {personality_key}, voice: {personality['voice']}")
             response_text = await query_ollama(transcript, history, system_prompt)
             logger.info(f"Ollama response: {response_text[:200]}...")
@@ -644,6 +714,15 @@ async def list_personalities():
             for key, p in PERSONALITIES.items()
         ]
     }
+
+
+@app.get("/api/weather")
+async def weather_endpoint():
+    """Get current weather."""
+    weather = await get_weather()
+    if weather:
+        return weather
+    raise HTTPException(status_code=503, detail="Weather service unavailable")
 
 
 @app.get("/static/icon-{size}.png")

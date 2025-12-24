@@ -48,6 +48,10 @@ services:
       - PIPER_PORT=10200
       - QDRANT_URL=http://192.168.76.242:6333
       - QDRANT_COLLECTION=socrates
+      # Weather location (default: Los Angeles)
+      - WEATHER_LAT=34.0522
+      - WEATHER_LON=-118.2437
+      - WEATHER_TIMEZONE=America/Los_Angeles
     depends_on:
       - faster-whisper
       - piper
