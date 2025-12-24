@@ -456,6 +456,45 @@ async def process_voice(
         if not transcript.strip():
             raise HTTPException(status_code=400, detail="Could not transcribe audio")
 
+        # Step 1b: Check for quick capture commands
+        capture_prefixes = [
+            "remember that ", "remember ", "note that ", "note ",
+            "save this ", "save that ", "don't forget ", "keep in mind "
+        ]
+        for prefix in capture_prefixes:
+            if transcript.lower().startswith(prefix):
+                # Extract the content to remember
+                content = transcript[len(prefix):].strip()
+                if content:
+                    await add_to_qdrant(content, source="memory", metadata={"type": "quick_capture"})
+                    logger.info(f"Quick capture saved: {content[:50]}...")
+
+                    # Quick confirmation response
+                    response_text = "Got it, I'll remember that."
+                    response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+
+                    add_to_history(session_id, transcript, response_text)
+
+                    # Ensure conversation exists
+                    cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+                    if not await cursor.fetchone():
+                        title = transcript[:50] + "..." if len(transcript) > 50 else transcript
+                        await create_conversation(session_id, title, personality_key)
+
+                    await save_message(session_id, "user", transcript)
+                    await save_message(session_id, "assistant", response_text)
+
+                    return Response(
+                        content=response_audio,
+                        media_type="audio/wav",
+                        headers={
+                            "X-Transcript": transcript,
+                            "X-Response-Text": response_text,
+                            "X-Session-Id": session_id
+                        }
+                    )
+                break
+
         # Step 2: RAG search for context
         rag_context = ""
         try:
