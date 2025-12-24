@@ -19,10 +19,12 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",  # For sending emails
     "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/contacts.readonly",  # For contacts lookup
 ]
 
 CREDENTIALS_PATH = "/data/google_credentials.json"
 TOKEN_PATH = "/data/google_token.json"
+CONTACTS_PATH = "/data/contacts.json"
 
 
 def get_credentials() -> Optional[Credentials]:
@@ -259,3 +261,88 @@ def send_email(to: str, subject: str, body: str) -> dict:
     except Exception as e:
         logger.error(f"Email send failed: {e}")
         return {"error": str(e)}
+
+
+def sync_contacts() -> dict:
+    """Sync Google Contacts to local file."""
+    creds = get_credentials()
+    if not creds:
+        return {"error": "Not authenticated"}
+
+    try:
+        service = build("people", "v1", credentials=creds)
+
+        contacts = {}
+        next_page_token = None
+
+        while True:
+            results = service.people().connections().list(
+                resourceName="people/me",
+                pageSize=200,
+                personFields="names,emailAddresses",
+                pageToken=next_page_token
+            ).execute()
+
+            for person in results.get("connections", []):
+                names = person.get("names", [])
+                emails = person.get("emailAddresses", [])
+
+                if names and emails:
+                    # Get primary or first name
+                    name = names[0].get("displayName", "").lower()
+                    first_name = names[0].get("givenName", "").lower()
+                    email = emails[0].get("value", "")
+
+                    if name and email:
+                        contacts[name] = email
+                    if first_name and email and first_name != name:
+                        contacts[first_name] = email
+
+            next_page_token = results.get("nextPageToken")
+            if not next_page_token:
+                break
+
+        # Save to file
+        with open(CONTACTS_PATH, "w") as f:
+            json.dump(contacts, f)
+
+        return {"synced": len(contacts), "source": "contacts"}
+
+    except Exception as e:
+        logger.error(f"Contacts sync failed: {e}")
+        return {"error": str(e)}
+
+
+def lookup_contact(name: str) -> Optional[str]:
+    """Look up email by contact name."""
+    try:
+        if os.path.exists(CONTACTS_PATH):
+            with open(CONTACTS_PATH, "r") as f:
+                contacts = json.load(f)
+
+            name_lower = name.lower().strip()
+
+            # Exact match
+            if name_lower in contacts:
+                return contacts[name_lower]
+
+            # Partial match
+            for contact_name, email in contacts.items():
+                if name_lower in contact_name or contact_name in name_lower:
+                    return email
+
+        return None
+    except Exception as e:
+        logger.error(f"Contact lookup failed: {e}")
+        return None
+
+
+def get_all_contacts() -> dict:
+    """Get all synced contacts."""
+    try:
+        if os.path.exists(CONTACTS_PATH):
+            with open(CONTACTS_PATH, "r") as f:
+                return json.load(f)
+        return {}
+    except Exception:
+        return {}

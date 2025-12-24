@@ -580,7 +580,52 @@ async def process_voice(
                     )
                 break
 
-        # Step 1c: Check for email summarization
+        # Step 1c: Check for send email command
+        send_email_patterns = ["send email to ", "send an email to ", "email to ", "send a message to "]
+        for pattern in send_email_patterns:
+            if pattern in lower_transcript:
+                # Extract name and message
+                after_pattern = transcript.lower().split(pattern, 1)[1]
+                parts = after_pattern.split(" saying ", 1)
+
+                if len(parts) >= 1:
+                    recipient_name = parts[0].strip()
+                    message_body = parts[1].strip() if len(parts) > 1 else "Hello from Socrates"
+
+                    # Look up contact
+                    email = google_sync.lookup_contact(recipient_name)
+
+                    if email:
+                        result = google_sync.send_email(email, f"Message from Socrates", message_body)
+                        if result.get("success"):
+                            response_text = f"Email sent to {recipient_name}."
+                        else:
+                            response_text = f"Failed to send email: {result.get('error', 'unknown error')}"
+                    else:
+                        response_text = f"I don't have an email address for {recipient_name}. Try syncing your contacts."
+
+                    response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                    add_to_history(session_id, transcript, response_text)
+
+                    cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+                    if not await cursor.fetchone():
+                        await create_conversation(session_id, f"Email to {recipient_name}", personality_key)
+
+                    await save_message(session_id, "user", transcript)
+                    await save_message(session_id, "assistant", response_text)
+
+                    return Response(
+                        content=response_audio,
+                        media_type="audio/wav",
+                        headers={
+                            "X-Transcript": transcript,
+                            "X-Response-Text": sanitize_header(response_text),
+                            "X-Session-Id": session_id
+                        }
+                    )
+                break
+
+        # Step 1d: Check for email summarization
         email_summary_triggers = ["summarize my emails", "summarize emails", "email summary", "what emails do i have", "any important emails", "read my emails"]
         if any(trigger in lower_transcript for trigger in email_summary_triggers):
             try:
@@ -902,10 +947,33 @@ async def sync_google_sheet(spreadsheet_id: str, range_name: str = "A1:Z100"):
 
 
 @app.post("/api/google/send-email")
-async def send_email(to: str, subject: str, body: str):
+async def send_email_endpoint(to: str, subject: str, body: str):
     """Send an email via Gmail."""
     result = google_sync.send_email(to, subject, body)
     return result
+
+
+@app.post("/api/google/sync/contacts")
+async def sync_google_contacts():
+    """Sync Google Contacts."""
+    result = google_sync.sync_contacts()
+    return result
+
+
+@app.get("/api/google/contacts")
+async def get_contacts():
+    """Get all synced contacts."""
+    contacts = google_sync.get_all_contacts()
+    return {"contacts": contacts, "count": len(contacts)}
+
+
+@app.get("/api/google/contacts/lookup")
+async def lookup_contact(name: str):
+    """Look up a contact's email by name."""
+    email = google_sync.lookup_contact(name)
+    if email:
+        return {"name": name, "email": email}
+    raise HTTPException(status_code=404, detail=f"Contact '{name}' not found")
 
 
 @app.post("/api/sms/send")
