@@ -149,7 +149,7 @@ async def sync_calendar(add_to_qdrant_func, days_ahead: int = 14) -> dict:
         return {"error": str(e)}
 
 
-async def sync_gmail(add_to_qdrant_func, max_emails: int = 50) -> dict:
+async def sync_gmail(add_to_qdrant_func, max_emails: int = 200) -> dict:
     """Sync recent emails to Qdrant."""
     creds = get_credentials()
     if not creds:

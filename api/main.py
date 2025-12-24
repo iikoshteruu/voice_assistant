@@ -591,16 +591,16 @@ async def process_voice(
                         scroll_filter=Filter(
                             must=[FieldCondition(key="source", match=MatchValue(value="gmail"))]
                         ),
-                        limit=20,
+                        limit=50,
                         with_payload=True
                     )
                     emails = [p.payload.get("content", "") for p in results[0] if p.payload.get("content")]
 
                 if emails:
                     logger.info(f"Summarizing {len(emails)} emails")
-                    summary_prompt = f"""Summarize these emails briefly. Highlight any urgent or important items. Be concise (3-4 sentences max):
+                    summary_prompt = f"""Summarize these emails briefly. Highlight any urgent or important items. Group by sender or topic if helpful. Be concise (4-5 sentences max):
 
-{chr(10).join(emails[:15])}"""
+{chr(10).join(emails[:30])}"""
                     response_text = await query_ollama(summary_prompt, [], personality["prompt"])
                 else:
                     response_text = "I don't have any emails synced yet. Try syncing your Gmail first."
