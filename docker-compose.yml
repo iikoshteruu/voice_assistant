@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   faster-whisper:
     image: fedirz/faster-whisper-server:latest-cuda
@@ -8,7 +6,7 @@ services:
     ports:
       - "8100:8000"
     volumes:
-      - ./models/whisper:/root/.cache/huggingface
+      - /mnt/Pool/configs/voice-assistant/whisper:/root/.cache/huggingface
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-medium
       - WHISPER__DEVICE=cuda
@@ -27,7 +25,7 @@ services:
     ports:
       - "10200:10200"
     volumes:
-      - ./models/piper:/data
+      - /mnt/Pool/configs/voice-assistant/piper:/data
     command: >
       --voice en_US-lessac-medium
       --data-dir /data
@@ -41,17 +39,10 @@ services:
       - "8150:8000"
     environment:
       - WHISPER_URL=http://faster-whisper:8000
-      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_URL=http://192.168.76.242:30068
+      - OLLAMA_MODEL=llama3:8b
       - PIPER_HOST=piper
       - PIPER_PORT=10200
     depends_on:
       - faster-whisper
       - piper
-    networks:
-      - default
-      - ollama-network
-
-networks:
-  ollama-network:
-    external: true
-    name: ollama_default  # adjust to match your ollama stack's network name
