@@ -379,10 +379,13 @@ async def process_voice(
         try:
             rag_results = await rag_search(transcript)
             if rag_results:
-                rag_context = "\n\nRelevant context from your knowledge base:\n" + "\n".join(
-                    [f"- {r['content']}" for r in rag_results if r['score'] > 0.5]
-                )
-                logger.info(f"RAG found {len(rag_results)} results")
+                # Include results with score > 0.3
+                relevant = [r for r in rag_results if r['score'] > 0.3]
+                if relevant:
+                    rag_context = "\n\nRelevant context from your knowledge base:\n" + "\n".join(
+                        [f"- {r['content']}" for r in relevant]
+                    )
+                logger.info(f"RAG found {len(rag_results)} results, {len(relevant)} above threshold")
         except Exception as e:
             logger.error(f"RAG search error: {e}")
 
