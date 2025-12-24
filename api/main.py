@@ -21,6 +21,8 @@ from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
 from wyoming.tts import Synthesize
 
+import google_sync
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -532,10 +534,60 @@ async def search_knowledge(q: str, limit: int = 5):
     return {"results": results}
 
 
+@app.get("/api/google/status")
+async def google_status():
+    """Check Google auth status."""
+    return {"authenticated": google_sync.is_authenticated()}
+
+
+@app.get("/api/google/auth")
+async def google_auth_url():
+    """Get Google OAuth URL."""
+    try:
+        url = google_sync.get_auth_url()
+        return {"auth_url": url}
+    except FileNotFoundError:
+        raise HTTPException(status_code=503, detail="Google credentials not configured. Upload credentials JSON to /data/google_credentials.json")
+
+
+@app.post("/api/google/auth")
+async def google_auth_complete(code: str):
+    """Complete Google OAuth with code."""
+    success = google_sync.complete_auth(code)
+    if success:
+        return {"status": "authenticated"}
+    raise HTTPException(status_code=400, detail="Authentication failed")
+
+
+@app.post("/api/google/sync/calendar")
+async def sync_google_calendar():
+    """Sync Google Calendar to knowledge base."""
+    result = await google_sync.sync_calendar(add_to_qdrant)
+    return result
+
+
+@app.post("/api/google/sync/gmail")
+async def sync_google_gmail(max_emails: int = 50):
+    """Sync Gmail to knowledge base."""
+    result = await google_sync.sync_gmail(add_to_qdrant, max_emails)
+    return result
+
+
+@app.post("/api/google/sync/sheets")
+async def sync_google_sheet(spreadsheet_id: str, range_name: str = "A1:Z100"):
+    """Sync a Google Sheet to knowledge base."""
+    result = await google_sync.sync_sheet(add_to_qdrant, spreadsheet_id, range_name)
+    return result
+
+
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "qdrant": qdrant is not None}
+    return {
+        "status": "ok",
+        "qdrant": qdrant is not None,
+        "google": google_sync.is_authenticated()
+    }
 
 
 @app.get("/static/icon-{size}.png")
