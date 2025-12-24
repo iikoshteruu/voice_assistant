@@ -1,13 +1,18 @@
 import asyncio
 import io
 import json
+import logging
 import struct
+import traceback
 import wave
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 from fastapi.responses import Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic_settings import BaseSettings
@@ -172,28 +177,51 @@ async def process_voice(audio: UploadFile = File(...)):
     Main voice processing endpoint.
     Receives audio, transcribes, queries LLM, synthesizes response.
     """
-    # Read uploaded audio
-    audio_bytes = await audio.read()
+    try:
+        # Read uploaded audio
+        audio_bytes = await audio.read()
+        logger.info(f"Received audio: {len(audio_bytes)} bytes, filename: {audio.filename}")
 
-    # Step 1: Transcribe
-    transcript = await transcribe_audio(audio_bytes, audio.filename or "audio.wav")
-    if not transcript.strip():
-        raise HTTPException(status_code=400, detail="Could not transcribe audio")
+        # Step 1: Transcribe
+        try:
+            transcript = await transcribe_audio(audio_bytes, audio.filename or "audio.wav")
+            logger.info(f"Transcription result: {transcript}")
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}\n{traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
-    # Step 2: Query Ollama
-    response_text = await query_ollama(transcript)
+        if not transcript.strip():
+            raise HTTPException(status_code=400, detail="Could not transcribe audio")
 
-    # Step 3: Synthesize speech
-    response_audio = await synthesize_speech_wyoming(response_text)
+        # Step 2: Query Ollama
+        try:
+            response_text = await query_ollama(transcript)
+            logger.info(f"Ollama response: {response_text[:200]}...")
+        except Exception as e:
+            logger.error(f"Ollama failed: {e}\n{traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Ollama failed: {str(e)}")
 
-    return Response(
-        content=response_audio,
-        media_type="audio/wav",
-        headers={
-            "X-Transcript": transcript,
-            "X-Response-Text": response_text[:500]  # Truncate for header safety
-        }
-    )
+        # Step 3: Synthesize speech
+        try:
+            response_audio = await synthesize_speech_wyoming(response_text)
+            logger.info(f"TTS result: {len(response_audio)} bytes")
+        except Exception as e:
+            logger.error(f"TTS failed: {e}\n{traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+
+        return Response(
+            content=response_audio,
+            media_type="audio/wav",
+            headers={
+                "X-Transcript": transcript,
+                "X-Response-Text": response_text[:500]
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 @app.post("/api/transcribe")
