@@ -215,6 +215,61 @@ async def get_weather() -> dict:
     return None
 
 
+async def get_daily_briefing_context() -> str:
+    """Gather context for daily briefing: weather, calendar, emails."""
+    context_parts = []
+
+    # Get weather
+    weather = await get_weather()
+    if weather:
+        current = weather["current"]
+        forecast = weather.get("forecast", [{}])[0] if weather.get("forecast") else {}
+        context_parts.append(
+            f"Weather: Currently {current['temp']}°F and {current['condition']}. "
+            f"Today's high {forecast.get('high', 'N/A')}°F, low {forecast.get('low', 'N/A')}°F, "
+            f"{forecast.get('rain_chance', 0)}% chance of rain."
+        )
+
+    # Get today's calendar events from Qdrant
+    if qdrant:
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            results = qdrant.scroll(
+                collection_name=settings.qdrant_collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="source", match=MatchValue(value="google_calendar"))]
+                ),
+                limit=20,
+                with_payload=True
+            )
+            events = [p.payload.get("content", "") for p in results[0] if today in p.payload.get("content", "")]
+            if events:
+                context_parts.append(f"Today's calendar: {'; '.join(events[:5])}")
+            else:
+                context_parts.append("No calendar events for today.")
+        except Exception as e:
+            logger.error(f"Calendar briefing error: {e}")
+
+    # Get recent emails (last few)
+    if qdrant:
+        try:
+            results = qdrant.scroll(
+                collection_name=settings.qdrant_collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="source", match=MatchValue(value="gmail"))]
+                ),
+                limit=5,
+                with_payload=True
+            )
+            emails = [p.payload.get("content", "")[:100] for p in results[0]]
+            if emails:
+                context_parts.append(f"Recent emails: {'; '.join(emails)}")
+        except Exception as e:
+            logger.error(f"Email briefing error: {e}")
+
+    return "\n".join(context_parts) if context_parts else ""
+
+
 async def add_to_qdrant(content: str, source: str, metadata: dict = None):
     """Add content to Qdrant for future retrieval."""
     if not qdrant:
@@ -510,6 +565,40 @@ async def process_voice(
                         }
                     )
                 break
+
+        # Step 1c: Check for daily briefing triggers
+        briefing_triggers = ["good morning", "start my day", "daily briefing", "what's on my agenda", "brief me"]
+        if any(trigger in lower_transcript for trigger in briefing_triggers):
+            briefing_context = await get_daily_briefing_context()
+            if briefing_context:
+                logger.info("Daily briefing triggered")
+
+                # Use LLM to create a natural briefing
+                briefing_prompt = f"""Give a friendly, concise morning briefing based on this information. Keep it conversational and under 4 sentences:
+
+{briefing_context}"""
+
+                response_text = await query_ollama(briefing_prompt, [], personality["prompt"])
+                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+
+                add_to_history(session_id, transcript, response_text)
+
+                cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+                if not await cursor.fetchone():
+                    await create_conversation(session_id, "Daily Briefing", personality_key)
+
+                await save_message(session_id, "user", transcript)
+                await save_message(session_id, "assistant", response_text)
+
+                return Response(
+                    content=response_audio,
+                    media_type="audio/wav",
+                    headers={
+                        "X-Transcript": transcript,
+                        "X-Response-Text": response_text,
+                        "X-Session-Id": session_id
+                    }
+                )
 
         # Step 2: RAG search for context
         rag_context = ""
