@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Voice Assistant</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+            width: 100%;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        h1 {
+            text-align: center;
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            color: #fff;
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+            background: #1a1a1a;
+        }
+
+        .status.listening {
+            background: #1a2f1a;
+            color: #4ade80;
+        }
+
+        .status.processing {
+            background: #2f2f1a;
+            color: #facc15;
+        }
+
+        .status.error {
+            background: #2f1a1a;
+            color: #f87171;
+        }
+
+        .conversation {
+            flex: 1;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #111;
+            border-radius: 12px;
+            min-height: 200px;
+        }
+
+        .message {
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 12px;
+            max-width: 85%;
+        }
+
+        .message.user {
+            background: #2563eb;
+            color: white;
+            margin-left: auto;
+        }
+
+        .message.assistant {
+            background: #262626;
+            color: #e0e0e0;
+        }
+
+        .message .label {
+            font-size: 0.7rem;
+            opacity: 0.7;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+        }
+
+        .button-container {
+            display: flex;
+            justify-content: center;
+            padding: 20px 0;
+        }
+
+        #recordBtn {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(145deg, #2563eb, #1d4ed8);
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 4px 20px rgba(37, 99, 235, 0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #recordBtn:active, #recordBtn.recording {
+            transform: scale(0.95);
+            background: linear-gradient(145deg, #dc2626, #b91c1c);
+            box-shadow: 0 4px 20px rgba(220, 38, 38, 0.4);
+        }
+
+        #recordBtn:disabled {
+            background: #333;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .mic-icon {
+            width: 40px;
+            height: 40px;
+        }
+
+        .settings {
+            margin-top: auto;
+            padding: 15px;
+            background: #111;
+            border-radius: 12px;
+        }
+
+        .settings summary {
+            cursor: pointer;
+            font-size: 0.9rem;
+            color: #888;
+        }
+
+        .settings-content {
+            margin-top: 15px;
+        }
+
+        .settings label {
+            display: block;
+            font-size: 0.8rem;
+            color: #888;
+            margin-bottom: 5px;
+        }
+
+        .settings input, .settings select {
+            width: 100%;
+            padding: 10px;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 1rem;
+            margin-bottom: 10px;
+        }
+
+        @media (max-height: 600px) {
+            .conversation {
+                min-height: 100px;
+            }
+
+            #recordBtn {
+                width: 100px;
+                height: 100px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Voice Assistant</h1>
+
+        <div id="status" class="status">Ready - Hold button to speak</div>
+
+        <div class="conversation" id="conversation"></div>
+
+        <div class="button-container">
+            <button id="recordBtn">
+                <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" y1="19" x2="12" y2="23"/>
+                    <line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
+            </button>
+        </div>
+
+        <details class="settings">
+            <summary>Settings</summary>
+            <div class="settings-content">
+                <label for="serverUrl">Server URL</label>
+                <input type="text" id="serverUrl" value="" placeholder="Leave empty for same origin">
+            </div>
+        </details>
+    </div>
+
+    <script>
+        const recordBtn = document.getElementById('recordBtn');
+        const statusEl = document.getElementById('status');
+        const conversationEl = document.getElementById('conversation');
+        const serverUrlInput = document.getElementById('serverUrl');
+
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+
+        // Load saved server URL
+        serverUrlInput.value = localStorage.getItem('serverUrl') || '';
+        serverUrlInput.addEventListener('change', () => {
+            localStorage.setItem('serverUrl', serverUrlInput.value);
+        });
+
+        function getServerUrl() {
+            return serverUrlInput.value || window.location.origin;
+        }
+
+        function setStatus(text, className = '') {
+            statusEl.textContent = text;
+            statusEl.className = 'status ' + className;
+        }
+
+        function addMessage(text, type) {
+            const msg = document.createElement('div');
+            msg.className = 'message ' + type;
+
+            const label = document.createElement('div');
+            label.className = 'label';
+            label.textContent = type === 'user' ? 'You' : 'Assistant';
+
+            const content = document.createElement('div');
+            content.textContent = text;
+
+            msg.appendChild(label);
+            msg.appendChild(content);
+            conversationEl.appendChild(msg);
+            conversationEl.scrollTop = conversationEl.scrollHeight;
+        }
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        sampleRate: 16000
+                    }
+                });
+
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+                });
+
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        audioChunks.push(e.data);
+                    }
+                };
+
+                mediaRecorder.onstop = async () => {
+                    stream.getTracks().forEach(track => track.stop());
+                    await processAudio();
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+                recordBtn.classList.add('recording');
+                setStatus('Listening...', 'listening');
+
+            } catch (err) {
+                console.error('Microphone error:', err);
+                setStatus('Microphone access denied', 'error');
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                recordBtn.classList.remove('recording');
+            }
+        }
+
+        async function processAudio() {
+            if (audioChunks.length === 0) {
+                setStatus('No audio recorded', 'error');
+                return;
+            }
+
+            setStatus('Processing...', 'processing');
+            recordBtn.disabled = true;
+
+            try {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'recording.webm');
+
+                const response = await fetch(`${getServerUrl()}/api/voice`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Server error: ${response.status}`);
+                }
+
+                // Get transcript and response from headers
+                const transcript = response.headers.get('X-Transcript') || '';
+                const responseText = response.headers.get('X-Response-Text') || '';
+
+                if (transcript) {
+                    addMessage(transcript, 'user');
+                }
+                if (responseText) {
+                    addMessage(responseText, 'assistant');
+                }
+
+                // Play audio response
+                const audioData = await response.blob();
+                if (audioData.size > 0) {
+                    const audioUrl = URL.createObjectURL(audioData);
+                    const audio = new Audio(audioUrl);
+                    audio.play();
+                    audio.onended = () => URL.revokeObjectURL(audioUrl);
+                }
+
+                setStatus('Ready - Hold button to speak');
+
+            } catch (err) {
+                console.error('Processing error:', err);
+                setStatus('Error: ' + err.message, 'error');
+            } finally {
+                recordBtn.disabled = false;
+            }
+        }
+
+        // Push-to-talk handlers
+        recordBtn.addEventListener('mousedown', startRecording);
+        recordBtn.addEventListener('mouseup', stopRecording);
+        recordBtn.addEventListener('mouseleave', stopRecording);
+
+        recordBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startRecording();
+        });
+        recordBtn.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            stopRecording();
+        });
+        recordBtn.addEventListener('touchcancel', stopRecording);
+
+        // Keyboard shortcut (spacebar)
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' && !e.repeat && document.activeElement.tagName !== 'INPUT') {
+                e.preventDefault();
+                startRecording();
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            if (e.code === 'Space') {
+                e.preventDefault();
+                stopRecording();
+            }
+        });
+    </script>
+</body>
+</html>

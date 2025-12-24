@@ -1,0 +1,57 @@
+version: "3.8"
+
+services:
+  faster-whisper:
+    image: fedirz/faster-whisper-server:latest-cuda
+    container_name: voice-whisper
+    restart: unless-stopped
+    ports:
+      - "8100:8000"
+    volumes:
+      - ./models/whisper:/root/.cache/huggingface
+    environment:
+      - WHISPER__MODEL=Systran/faster-whisper-medium
+      - WHISPER__DEVICE=cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  piper:
+    image: rhasspy/wyoming-piper:latest
+    container_name: voice-piper
+    restart: unless-stopped
+    ports:
+      - "10200:10200"
+    volumes:
+      - ./models/piper:/data
+    command: >
+      --voice en_US-lessac-medium
+      --data-dir /data
+      --download-dir /data
+
+  voice-api:
+    image: ghcr.io/iikoshteruu/voice_assistant/voice-orchestrator:latest
+    container_name: voice-api
+    restart: unless-stopped
+    ports:
+      - "8150:8000"
+    environment:
+      - WHISPER_URL=http://faster-whisper:8000
+      - OLLAMA_URL=http://ollama:11434
+      - PIPER_HOST=piper
+      - PIPER_PORT=10200
+    depends_on:
+      - faster-whisper
+      - piper
+    networks:
+      - default
+      - ollama-network
+
+networks:
+  ollama-network:
+    external: true
+    name: ollama_default  # adjust to match your ollama stack's network name
