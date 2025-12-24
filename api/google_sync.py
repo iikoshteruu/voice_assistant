@@ -46,23 +46,41 @@ def save_token(creds: Credentials):
         f.write(creds.to_json())
 
 
-def get_auth_url() -> str:
-    """Get OAuth authorization URL."""
+def run_local_auth() -> bool:
+    """Run OAuth flow with local server (must be run interactively)."""
+    if not os.path.exists(CREDENTIALS_PATH):
+        raise FileNotFoundError("Google credentials not configured")
+
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
+        creds = flow.run_local_server(port=8089, open_browser=False)
+        save_token(creds)
+        return True
+    except Exception as e:
+        logger.error(f"Auth failed: {e}")
+        return False
+
+
+def get_auth_url(redirect_uri: str) -> tuple[str, str]:
+    """Get OAuth authorization URL for manual flow."""
     if not os.path.exists(CREDENTIALS_PATH):
         raise FileNotFoundError("Google credentials not configured")
 
     flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-    flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+    flow.redirect_uri = redirect_uri
 
-    auth_url, _ = flow.authorization_url(prompt="consent")
-    return auth_url
+    auth_url, state = flow.authorization_url(
+        prompt="consent",
+        access_type="offline"
+    )
+    return auth_url, state
 
 
-def complete_auth(code: str) -> bool:
+def complete_auth(code: str, redirect_uri: str) -> bool:
     """Complete OAuth flow with authorization code."""
     try:
         flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-        flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+        flow.redirect_uri = redirect_uri
         flow.fetch_token(code=code)
         save_token(flow.credentials)
         return True

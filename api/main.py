@@ -11,7 +11,7 @@ from typing import Optional
 
 import aiosqlite
 import httpx
-from fastapi import FastAPI, File, UploadFile, HTTPException, Header
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse, JSONResponse
 from pydantic_settings import BaseSettings
@@ -541,22 +541,35 @@ async def google_status():
 
 
 @app.get("/api/google/auth")
-async def google_auth_url():
-    """Get Google OAuth URL."""
+async def google_auth_start(request: Request):
+    """Start Google OAuth - redirects to Google."""
+    from starlette.responses import RedirectResponse
+
+    # Build redirect URI based on request
+    redirect_uri = f"https://voice.iikomedia.com/api/google/callback"
+
     try:
-        url = google_sync.get_auth_url()
-        return {"auth_url": url}
+        url, state = google_sync.get_auth_url(redirect_uri)
+        return RedirectResponse(url)
     except FileNotFoundError:
-        raise HTTPException(status_code=503, detail="Google credentials not configured. Upload credentials JSON to /data/google_credentials.json")
+        raise HTTPException(status_code=503, detail="Google credentials not configured")
 
 
-@app.post("/api/google/auth")
-async def google_auth_complete(code: str):
-    """Complete Google OAuth with code."""
-    success = google_sync.complete_auth(code)
+@app.get("/api/google/callback")
+async def google_auth_callback(code: str = None, error: str = None):
+    """Handle Google OAuth callback."""
+    if error:
+        return HTMLResponse(f"<h1>Auth Error</h1><p>{error}</p>")
+
+    if not code:
+        return HTMLResponse("<h1>Error</h1><p>No code received</p>")
+
+    redirect_uri = "https://voice.iikomedia.com/api/google/callback"
+    success = google_sync.complete_auth(code, redirect_uri)
+
     if success:
-        return {"status": "authenticated"}
-    raise HTTPException(status_code=400, detail="Authentication failed")
+        return HTMLResponse("<h1>Success!</h1><p>Google account connected. You can close this window.</p><script>setTimeout(() => window.close(), 2000)</script>")
+    return HTMLResponse("<h1>Error</h1><p>Authentication failed</p>")
 
 
 @app.post("/api/google/sync/calendar")
