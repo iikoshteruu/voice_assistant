@@ -571,10 +571,11 @@ async def process_voice(
                 break
 
         # Step 1c: Check for email summarization
-        email_summary_triggers = ["summarize my emails", "summarize emails", "email summary", "what emails do i have", "any important emails"]
+        email_summary_triggers = ["summarize my emails", "summarize emails", "email summary", "what emails do i have", "any important emails", "read my emails"]
         if any(trigger in lower_transcript for trigger in email_summary_triggers):
-            if qdrant:
-                try:
+            try:
+                emails = []
+                if qdrant:
                     results = qdrant.scroll(
                         collection_name=settings.qdrant_collection,
                         scroll_filter=Filter(
@@ -583,37 +584,39 @@ async def process_voice(
                         limit=20,
                         with_payload=True
                     )
-                    emails = [p.payload.get("content", "") for p in results[0]]
-                    if emails:
-                        logger.info(f"Summarizing {len(emails)} emails")
+                    emails = [p.payload.get("content", "") for p in results[0] if p.payload.get("content")]
 
-                        summary_prompt = f"""Summarize these emails briefly. Highlight any urgent or important items. Be concise (3-4 sentences max):
+                if emails:
+                    logger.info(f"Summarizing {len(emails)} emails")
+                    summary_prompt = f"""Summarize these emails briefly. Highlight any urgent or important items. Be concise (3-4 sentences max):
 
 {chr(10).join(emails[:15])}"""
+                    response_text = await query_ollama(summary_prompt, [], personality["prompt"])
+                else:
+                    response_text = "I don't have any emails synced yet. Try syncing your Gmail first."
 
-                        response_text = await query_ollama(summary_prompt, [], personality["prompt"])
-                        response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                add_to_history(session_id, transcript, response_text)
 
-                        add_to_history(session_id, transcript, response_text)
+                cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+                if not await cursor.fetchone():
+                    await create_conversation(session_id, "Email Summary", personality_key)
 
-                        cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
-                        if not await cursor.fetchone():
-                            await create_conversation(session_id, "Email Summary", personality_key)
+                await save_message(session_id, "user", transcript)
+                await save_message(session_id, "assistant", response_text)
 
-                        await save_message(session_id, "user", transcript)
-                        await save_message(session_id, "assistant", response_text)
-
-                        return Response(
-                            content=response_audio,
-                            media_type="audio/wav",
-                            headers={
-                                "X-Transcript": transcript,
-                                "X-Response-Text": response_text,
-                                "X-Session-Id": session_id
-                            }
-                        )
-                except Exception as e:
-                    logger.error(f"Email summary error: {e}")
+                return Response(
+                    content=response_audio,
+                    media_type="audio/wav",
+                    headers={
+                        "X-Transcript": transcript,
+                        "X-Response-Text": response_text,
+                        "X-Session-Id": session_id
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Email summary error: {e}")
+                # Continue to normal processing instead of 500
 
         # Step 1d: Check for daily briefing triggers
         briefing_triggers = ["good morning", "start my day", "daily briefing", "what's on my agenda", "brief me"]
