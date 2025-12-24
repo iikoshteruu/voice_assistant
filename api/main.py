@@ -45,7 +45,14 @@ app = FastAPI(title="Socrates API", lifespan=lifespan)
 
 async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     """Send audio to faster-whisper-server for transcription."""
-    files = {"file": (filename, audio_bytes, "audio/wav")}
+    # Detect mime type from filename
+    if filename.endswith(".webm"):
+        mime_type = "audio/webm"
+    elif filename.endswith(".mp4") or filename.endswith(".m4a"):
+        mime_type = "audio/mp4"
+    else:
+        mime_type = "audio/wav"
+    files = {"file": (filename, audio_bytes, mime_type)}
     response = await http_client.post(
         f"{settings.whisper_url}/v1/audio/transcriptions",
         files=files,
@@ -92,32 +99,33 @@ async def synthesize_speech_wyoming(text: str) -> bytes:
     )
 
     try:
-        # Wyoming protocol: send synthesize request
-        synthesize_event = {
-            "type": "synthesize",
-            "data": {"text": text}
-        }
-        await _wyoming_send(writer, synthesize_event)
+        # Wyoming protocol uses newline-delimited JSON
+        synthesize_event = {"type": "synthesize", "data": {"text": text}}
+        writer.write(json.dumps(synthesize_event).encode() + b"\n")
+        await writer.drain()
 
-        # Collect audio chunks
         audio_chunks = []
         audio_info = None
 
         while True:
-            event = await _wyoming_receive(reader)
-            if event is None:
+            line = await reader.readline()
+            if not line:
                 break
 
-            if event["type"] == "audio-start":
+            event = json.loads(line.decode())
+            event_type = event.get("type", "")
+
+            if event_type == "audio-start":
                 audio_info = event.get("data", {})
-            elif event["type"] == "audio-chunk":
-                # Audio data is base64 or raw bytes following the event
-                if "payload" in event:
-                    audio_chunks.append(event["payload"])
-            elif event["type"] == "audio-stop":
+            elif event_type == "audio-chunk":
+                # Binary payload follows the JSON line
+                payload_length = event.get("data", {}).get("audio", {}).get("length", 0)
+                if payload_length > 0:
+                    audio_data = await reader.readexactly(payload_length)
+                    audio_chunks.append(audio_data)
+            elif event_type == "audio-stop":
                 break
 
-        # Combine chunks and create WAV
         if audio_chunks and audio_info:
             raw_audio = b"".join(audio_chunks)
             return _create_wav(
@@ -131,33 +139,6 @@ async def synthesize_speech_wyoming(text: str) -> bytes:
     finally:
         writer.close()
         await writer.wait_closed()
-
-
-async def _wyoming_send(writer: asyncio.StreamWriter, event: dict):
-    """Send a Wyoming protocol event."""
-    event_json = json.dumps(event).encode("utf-8")
-    header = struct.pack(">I", len(event_json))
-    writer.write(header + event_json)
-    await writer.drain()
-
-
-async def _wyoming_receive(reader: asyncio.StreamReader) -> Optional[dict]:
-    """Receive a Wyoming protocol event."""
-    try:
-        header = await reader.readexactly(4)
-        length = struct.pack(">I", *struct.unpack(">I", header))
-        length = struct.unpack(">I", header)[0]
-
-        event_data = await reader.readexactly(length)
-        event = json.loads(event_data.decode("utf-8"))
-
-        # Check if there's a payload
-        if event.get("payload_length", 0) > 0:
-            event["payload"] = await reader.readexactly(event["payload_length"])
-
-        return event
-    except asyncio.IncompleteReadError:
-        return None
 
 
 def _create_wav(raw_audio: bytes, sample_rate: int, sample_width: int, channels: int) -> bytes:
