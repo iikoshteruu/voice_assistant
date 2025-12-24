@@ -1,8 +1,6 @@
 import asyncio
 import io
-import json
 import logging
-import struct
 import traceback
 import wave
 from contextlib import asynccontextmanager
@@ -10,12 +8,14 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import Response, HTMLResponse
+from pydantic_settings import BaseSettings
+from wyoming.audio import AudioChunk, AudioStart, AudioStop
+from wyoming.client import AsyncTcpClient
+from wyoming.tts import Synthesize
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-from fastapi.responses import Response, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -94,51 +94,40 @@ async def query_ollama(text: str, conversation_history: list = None) -> str:
 
 async def synthesize_speech_wyoming(text: str) -> bytes:
     """Use Wyoming protocol to synthesize speech with Piper."""
-    reader, writer = await asyncio.open_connection(
-        settings.piper_host, settings.piper_port
-    )
-
-    try:
-        # Wyoming protocol uses newline-delimited JSON
-        synthesize_event = {"type": "synthesize", "data": {"text": text}}
-        writer.write(json.dumps(synthesize_event).encode() + b"\n")
-        await writer.drain()
+    async with AsyncTcpClient(settings.piper_host, settings.piper_port) as client:
+        await client.write_event(Synthesize(text=text).event())
 
         audio_chunks = []
         audio_info = None
 
         while True:
-            line = await reader.readline()
-            if not line:
+            event = await client.read_event()
+            if event is None:
                 break
 
-            event = json.loads(line.decode())
-            event_type = event.get("type", "")
-
-            if event_type == "audio-start":
-                audio_info = event.get("data", {})
-            elif event_type == "audio-chunk":
-                # Binary payload follows the JSON line
-                payload_length = event.get("data", {}).get("audio", {}).get("length", 0)
-                if payload_length > 0:
-                    audio_data = await reader.readexactly(payload_length)
-                    audio_chunks.append(audio_data)
-            elif event_type == "audio-stop":
+            if AudioStart.is_type(event.type):
+                audio_start = AudioStart.from_event(event)
+                audio_info = {
+                    "rate": audio_start.rate,
+                    "width": audio_start.width,
+                    "channels": audio_start.channels
+                }
+            elif AudioChunk.is_type(event.type):
+                chunk = AudioChunk.from_event(event)
+                audio_chunks.append(chunk.audio)
+            elif AudioStop.is_type(event.type):
                 break
 
         if audio_chunks and audio_info:
             raw_audio = b"".join(audio_chunks)
             return _create_wav(
                 raw_audio,
-                sample_rate=audio_info.get("rate", 22050),
-                sample_width=audio_info.get("width", 2),
-                channels=audio_info.get("channels", 1)
+                sample_rate=audio_info["rate"],
+                sample_width=audio_info["width"],
+                channels=audio_info["channels"]
             )
 
         return b""
-    finally:
-        writer.close()
-        await writer.wait_closed()
 
 
 def _create_wav(raw_audio: bytes, sample_rate: int, sample_width: int, channels: int) -> bytes:

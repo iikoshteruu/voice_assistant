@@ -4,3 +4,4 @@ python-multipart==0.0.6
 httpx==0.26.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
+wyoming==1.5.4

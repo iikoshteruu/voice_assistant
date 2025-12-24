@@ -40,7 +40,7 @@ services:
     environment:
       - WHISPER_URL=http://faster-whisper:8000
       - OLLAMA_URL=http://192.168.76.242:30068
-      - OLLAMA_MODEL=llama3:8b
+      - OLLAMA_MODEL=llama3.2:3b
       - PIPER_HOST=piper
       - PIPER_PORT=10200
     depends_on:
