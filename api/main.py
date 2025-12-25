@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import logging
 import os
 import traceback
@@ -37,6 +38,7 @@ class Settings(BaseSettings):
     piper_host: str = "piper"
     piper_port: int = 10200
     xtts_url: str = "http://xtts:8020"
+    xtts_speaker_file: str = "/data/xtts_speaker.json"
     tts_engine: str = "piper"  # "piper" or "xtts"
     max_history: int = 20
     session_timeout_minutes: int = 1440  # 24 hours - persist sessions all day
@@ -69,6 +71,9 @@ scheduler: Optional[AsyncIOScheduler] = None
 
 # Store for pending reminders (for display purposes)
 pending_reminders: dict[str, dict] = {}
+
+# XTTS speaker embeddings (loaded on startup)
+xtts_speaker: Optional[dict] = None
 
 # Personality definitions with prompts and voices
 PERSONALITIES = {
@@ -426,12 +431,28 @@ async def restore_reminders():
         logger.error(f"Failed to restore reminders: {e}")
 
 
+def load_xtts_speaker():
+    """Load XTTS speaker embeddings from file."""
+    global xtts_speaker
+    if os.path.exists(settings.xtts_speaker_file):
+        try:
+            with open(settings.xtts_speaker_file, "r") as f:
+                xtts_speaker = json.load(f)
+            logger.info(f"Loaded XTTS speaker embeddings from {settings.xtts_speaker_file}")
+        except Exception as e:
+            logger.error(f"Failed to load XTTS speaker: {e}")
+            xtts_speaker = None
+    else:
+        logger.warning(f"XTTS speaker file not found: {settings.xtts_speaker_file}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client, scheduler
     http_client = httpx.AsyncClient(timeout=300.0)  # 5 minute timeout
     await init_db()
     init_qdrant()
+    load_xtts_speaker()
 
     # Start the scheduler
     scheduler = AsyncIOScheduler()
@@ -682,12 +703,18 @@ async def synthesize_speech_wyoming(text: str, voice: str = None) -> bytes:
 async def synthesize_speech_xtts(text: str, speaker: str = "default") -> bytes:
     """Use XTTS API server for high-quality TTS."""
     try:
-        # XTTS API endpoint
+        # Check if speaker embeddings are loaded
+        if xtts_speaker is None:
+            logger.warning("XTTS speaker not loaded, falling back to Piper")
+            return await synthesize_speech_wyoming(text)
+
+        # XTTS API endpoint - requires speaker embeddings
         response = await http_client.post(
-            f"{settings.xtts_url}/tts_to_audio/",
+            f"{settings.xtts_url}/tts",
             json={
                 "text": text,
-                "speaker_wav": speaker,
+                "speaker_embedding": xtts_speaker.get("speaker_embedding"),
+                "gpt_cond_latent": xtts_speaker.get("gpt_cond_latent"),
                 "language": "en"
             },
             timeout=60.0  # XTTS can be slower

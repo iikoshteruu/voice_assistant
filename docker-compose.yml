@@ -19,7 +19,7 @@ services:
               capabilities: [gpu]
 
   xtts:
-    image: ghcr.io/daswer123/xtts-api-server:latest
+    image: daswer123/xtts-api-server:latest
     container_name: voice-xtts
     restart: unless-stopped
     ports:
@@ -29,6 +29,7 @@ services:
       - /mnt/Pool/configs/voice-assistant/xtts-speakers:/app/speakers
     environment:
       - COQUI_TOS_AGREED=1
+    command: --listen --device cuda
     deploy:
       resources:
         reservations:
@@ -69,16 +70,10 @@ services:
       - TTS_ENGINE=piper
       - QDRANT_URL=http://192.168.76.242:6333
       - QDRANT_COLLECTION=socrates
-      # Weather location: Ginoza Village, Okinawa, Japan
       - WEATHER_LAT=26.4833
       - WEATHER_LON=127.9833
       - WEATHER_TIMEZONE=Asia/Tokyo
-      # Twilio SMS (optional - uncomment and fill in to enable)
-      # - TWILIO_ACCOUNT_SID=your_account_sid
-      # - TWILIO_AUTH_TOKEN=your_auth_token
-      # - TWILIO_FROM_NUMBER=+1234567890
-      # RSS News Feeds (comma-separated, optional - defaults to BBC and NYT World)
-      # - NEWS_FEEDS=https://feeds.bbci.co.uk/news/world/rss.xml,https://rss.nytimes.com/services/xml/rss/nyt/World.xml
     depends_on:
       - faster-whisper
       - piper
+      - xtts
