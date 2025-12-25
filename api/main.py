@@ -700,21 +700,15 @@ async def synthesize_speech_wyoming(text: str, voice: str = None) -> bytes:
         return b""
 
 
-async def synthesize_speech_xtts(text: str, speaker: str = "default") -> bytes:
+async def synthesize_speech_xtts(text: str, speaker: str = "e508e6d4.wav") -> bytes:
     """Use XTTS API server for high-quality TTS."""
     try:
-        # Check if speaker embeddings are loaded
-        if xtts_speaker is None:
-            logger.warning("XTTS speaker not loaded, falling back to Piper")
-            return await synthesize_speech_wyoming(text)
-
-        # XTTS API endpoint - requires speaker embeddings
+        # XTTS API endpoint - uses speaker wav file from speakers folder
         response = await http_client.post(
             f"{settings.xtts_url}/tts_to_audio/",
             json={
                 "text": text,
-                "speaker_embedding": xtts_speaker.get("speaker_embedding"),
-                "gpt_cond_latent": xtts_speaker.get("gpt_cond_latent"),
+                "speaker_wav": speaker,
                 "language": "en"
             },
             timeout=60.0  # XTTS can be slower
