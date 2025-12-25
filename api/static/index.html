@@ -421,6 +421,12 @@
         <details class="settings">
             <summary>Settings</summary>
             <div class="settings-content">
+                <label for="ttsEngine">Voice Engine</label>
+                <select id="ttsEngine">
+                    <option value="piper">Piper (Fast)</option>
+                    <option value="xtts">XTTS (Natural)</option>
+                </select>
+
                 <label for="serverUrl">Server URL</label>
                 <input type="text" id="serverUrl" value="" placeholder="Leave empty for same origin">
             </div>
@@ -439,6 +445,7 @@
         const historyOverlay = document.getElementById('historyOverlay');
         const historyClose = document.getElementById('historyClose');
         const historyList = document.getElementById('historyList');
+        const ttsEngineSelect = document.getElementById('ttsEngine');
 
         let mediaRecorder = null;
         let audioChunks = [];
@@ -462,6 +469,37 @@
         serverUrlInput.value = localStorage.getItem('serverUrl') || '';
         serverUrlInput.addEventListener('change', () => {
             localStorage.setItem('serverUrl', serverUrlInput.value);
+        });
+
+        // TTS Engine selection
+        async function loadTtsStatus() {
+            try {
+                const response = await fetch(`${getServerUrl()}/api/tts/status`);
+                const data = await response.json();
+                ttsEngineSelect.value = data.current_engine;
+                // Update option text to show availability
+                if (!data.xtts_available) {
+                    ttsEngineSelect.querySelector('option[value="xtts"]').textContent = 'XTTS (Unavailable)';
+                }
+            } catch (err) {
+                console.log('Could not load TTS status');
+            }
+        }
+        loadTtsStatus();
+
+        ttsEngineSelect.addEventListener('change', async () => {
+            try {
+                const response = await fetch(`${getServerUrl()}/api/tts/engine?engine=${ttsEngineSelect.value}`, {
+                    method: 'POST'
+                });
+                if (response.ok) {
+                    setStatus(`Switched to ${ttsEngineSelect.value === 'xtts' ? 'XTTS (Natural)' : 'Piper (Fast)'}`);
+                    setTimeout(() => setStatus('Ready - Hold button to speak'), 2000);
+                }
+            } catch (err) {
+                console.error('Failed to switch TTS:', err);
+                setStatus('Failed to switch TTS engine', 'error');
+            }
         });
 
         function getServerUrl() {

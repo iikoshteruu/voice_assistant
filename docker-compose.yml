@@ -18,6 +18,25 @@ services:
               count: 1
               capabilities: [gpu]
 
+  xtts:
+    image: ghcr.io/daswer123/xtts-api-server:latest
+    container_name: voice-xtts
+    restart: unless-stopped
+    ports:
+      - "8020:8020"
+    volumes:
+      - /mnt/Pool/configs/voice-assistant/xtts:/app/tts_models
+      - /mnt/Pool/configs/voice-assistant/xtts-speakers:/app/speakers
+    environment:
+      - COQUI_TOS_AGREED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   piper:
     image: rhasspy/wyoming-piper:latest
     container_name: voice-piper
@@ -46,6 +65,8 @@ services:
       - OLLAMA_EMBED_MODEL=nomic-embed-text
       - PIPER_HOST=piper
       - PIPER_PORT=10200
+      - XTTS_URL=http://xtts:8020
+      - TTS_ENGINE=piper
       - QDRANT_URL=http://192.168.76.242:6333
       - QDRANT_COLLECTION=socrates
       # Weather location: Ginoza Village, Okinawa, Japan

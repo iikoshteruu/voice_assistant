@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     ollama_embed_model: str = "nomic-embed-text"
     piper_host: str = "piper"
     piper_port: int = 10200
+    xtts_url: str = "http://xtts:8020"
+    tts_engine: str = "piper"  # "piper" or "xtts"
     max_history: int = 20
     session_timeout_minutes: int = 1440  # 24 hours - persist sessions all day
     db_path: str = "/data/socrates.db"
@@ -333,22 +335,14 @@ async def get_daily_briefing_context() -> str:
         except Exception as e:
             logger.error(f"Calendar briefing error: {e}")
 
-    # Get recent emails (last few)
-    if qdrant:
-        try:
-            results = qdrant.scroll(
-                collection_name=settings.qdrant_collection,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="source", match=MatchValue(value="gmail"))]
-                ),
-                limit=5,
-                with_payload=True
-            )
-            emails = [p.payload.get("content", "")[:100] for p in results[0]]
-            if emails:
-                context_parts.append(f"Recent emails: {'; '.join(emails)}")
-        except Exception as e:
-            logger.error(f"Email briefing error: {e}")
+    # Get recent emails (fresh from Gmail, not stale cache)
+    try:
+        emails = google_sync.get_recent_emails(max_emails=5)
+        if emails:
+            email_summaries = [f"{e['from'].split('<')[0].strip()}: {e['subject']}" for e in emails]
+            context_parts.append(f"Recent emails: {'; '.join(email_summaries)}")
+    except Exception as e:
+        logger.error(f"Email briefing error: {e}")
 
     return "\n".join(context_parts) if context_parts else ""
 
@@ -685,6 +679,42 @@ async def synthesize_speech_wyoming(text: str, voice: str = None) -> bytes:
         return b""
 
 
+async def synthesize_speech_xtts(text: str, speaker: str = "default") -> bytes:
+    """Use XTTS API server for high-quality TTS."""
+    try:
+        # XTTS API endpoint
+        response = await http_client.post(
+            f"{settings.xtts_url}/tts_to_audio/",
+            json={
+                "text": text,
+                "speaker_wav": speaker,
+                "language": "en"
+            },
+            timeout=60.0  # XTTS can be slower
+        )
+
+        if response.status_code == 200:
+            return response.content
+        else:
+            logger.error(f"XTTS error: {response.status_code} - {response.text}")
+            # Fallback to Piper if XTTS fails
+            return await synthesize_speech_wyoming(text)
+
+    except Exception as e:
+        logger.error(f"XTTS failed, falling back to Piper: {e}")
+        return await synthesize_speech_wyoming(text)
+
+
+async def synthesize_speech(text: str, voice: str = None, engine: str = None) -> bytes:
+    """Synthesize speech using configured TTS engine."""
+    use_engine = engine or settings.tts_engine
+
+    if use_engine == "xtts":
+        return await synthesize_speech_xtts(text, speaker=voice or "default")
+    else:
+        return await synthesize_speech_wyoming(text, voice=voice)
+
+
 def sanitize_header(value: str, max_len: int = 500) -> str:
     """Sanitize a string for use in HTTP headers."""
     # Remove newlines and control characters
@@ -770,7 +800,7 @@ async def process_voice(
 
                     # Quick confirmation response
                     response_text = "Got it, I'll remember that."
-                    response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                    response_audio = await synthesize_speech(response_text, voice=personality["voice"])
 
                     add_to_history(session_id, transcript, response_text)
 
@@ -837,7 +867,7 @@ JSON:"""
                 logger.error(f"Schedule parse error: {e}")
                 response_text = "I had trouble parsing that. Try 'schedule meeting tomorrow at 2pm'."
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -918,7 +948,7 @@ JSON:"""
                 logger.error(f"Reminder parse error: {e}")
                 response_text = "I had trouble with that reminder. Try 'remind me in 30 minutes to take a break'."
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -965,7 +995,7 @@ Give a brief, informative response (2-3 sentences max)."""
                 else:
                     response_text = f"I couldn't find any results for '{query}'. Try rephrasing your search."
 
-                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                response_audio = await synthesize_speech(response_text, voice=personality["voice"])
                 add_to_history(session_id, transcript, response_text)
 
                 cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
@@ -995,7 +1025,7 @@ Give a brief, informative response (2-3 sentences max)."""
             else:
                 response_text = "I couldn't fetch the latest news. Please check your internet connection."
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
 
             cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
@@ -1032,7 +1062,7 @@ Give a brief, informative response (2-3 sentences max)."""
             else:
                 response_text = "You don't have any upcoming reminders."
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -1061,7 +1091,7 @@ Give a brief, informative response (2-3 sentences max)."""
                 f.write(note_content)
 
             response_text = "Voice note saved."
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -1081,7 +1111,7 @@ Give a brief, informative response (2-3 sentences max)."""
             else:
                 response_text = "I couldn't understand what to add."
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -1095,7 +1125,7 @@ Give a brief, informative response (2-3 sentences max)."""
             else:
                 response_text = "Your list is empty."
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -1117,7 +1147,7 @@ Give a brief, informative response (2-3 sentences max)."""
             else:
                 response_text = "I couldn't understand the amount. Try saying 'log $50 for groceries'."
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -1136,7 +1166,7 @@ Give a brief, informative response (2-3 sentences max)."""
             await db.commit()
             response_text = f"Logged {habit} for today. Keep it up!"
 
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             add_to_history(session_id, transcript, response_text)
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
@@ -1157,7 +1187,7 @@ Give a brief, informative response (2-3 sentences max)."""
 Question: {transcript}"""
 
                 response_text = await query_ollama(calc_prompt, [], "You are a helpful calculator. Give direct, accurate answers.")
-                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                response_audio = await synthesize_speech(response_text, voice=personality["voice"])
 
                 add_to_history(session_id, transcript, response_text)
 
@@ -1196,7 +1226,7 @@ Question: {transcript}"""
 Request: {transcript}"""
 
                 response_text = await query_ollama(translation_prompt, [], personality["prompt"])
-                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                response_audio = await synthesize_speech(response_text, voice=personality["voice"])
 
                 add_to_history(session_id, transcript, response_text)
 
@@ -1241,7 +1271,7 @@ Request: {transcript}"""
                     else:
                         response_text = f"I don't have an email address for {recipient_name}. Try syncing your contacts."
 
-                    response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                    response_audio = await synthesize_speech(response_text, voice=personality["voice"])
                     add_to_history(session_id, transcript, response_text)
 
                     cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
@@ -1285,7 +1315,7 @@ Request: {transcript}"""
                     else:
                         response_text = "I'm not connected to your Gmail. Please authenticate first."
 
-                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                response_audio = await synthesize_speech(response_text, voice=personality["voice"])
                 add_to_history(session_id, transcript, response_text)
 
                 cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
@@ -1334,7 +1364,7 @@ Request: {transcript}"""
 {briefing_context}"""
 
                 response_text = await query_ollama(briefing_prompt, [], system_with_memory)
-                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                response_audio = await synthesize_speech(response_text, voice=personality["voice"])
 
                 add_to_history(session_id, transcript, response_text)
 
@@ -1426,7 +1456,7 @@ Request: {transcript}"""
 
         # Step 4: Synthesize speech with personality voice
         try:
-            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
             logger.info(f"TTS result: {len(response_audio)} bytes")
         except Exception as e:
             logger.error(f"TTS failed: {e}\n{traceback.format_exc()}")
@@ -1678,8 +1708,132 @@ async def health_check():
         "status": "ok",
         "qdrant": qdrant is not None,
         "google": google_sync.is_authenticated(),
-        "twilio": all([settings.twilio_account_sid, settings.twilio_auth_token, settings.twilio_from_number])
+        "twilio": all([settings.twilio_account_sid, settings.twilio_auth_token, settings.twilio_from_number]),
+        "tts_engine": settings.tts_engine
     }
+
+
+@app.get("/api/tts/status")
+async def tts_status():
+    """Get current TTS engine status."""
+    xtts_available = False
+    try:
+        response = await http_client.get(f"{settings.xtts_url}/", timeout=5.0)
+        xtts_available = response.status_code == 200
+    except Exception:
+        pass
+
+    return {
+        "current_engine": settings.tts_engine,
+        "xtts_available": xtts_available,
+        "xtts_url": settings.xtts_url
+    }
+
+
+@app.post("/api/tts/engine")
+async def set_tts_engine(engine: str):
+    """Switch TTS engine (piper or xtts)."""
+    if engine not in ["piper", "xtts"]:
+        raise HTTPException(status_code=400, detail="Engine must be 'piper' or 'xtts'")
+    settings.tts_engine = engine
+    return {"status": "ok", "engine": engine}
+
+
+@app.get("/api/qdrant/sources")
+async def get_qdrant_sources():
+    """Get counts of items in Qdrant by source."""
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Qdrant not available")
+
+    sources = ["gmail", "google_calendar", "memory", "user_fact", "google_sheets"]
+    counts = {}
+
+    for source in sources:
+        try:
+            results = qdrant.scroll(
+                collection_name=settings.qdrant_collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="source", match=MatchValue(value=source))]
+                ),
+                limit=1000,
+                with_payload=False
+            )
+            counts[source] = len(results[0])
+        except Exception:
+            counts[source] = 0
+
+    return {"sources": counts}
+
+
+@app.get("/api/qdrant/data/{source}")
+async def get_qdrant_data(source: str, limit: int = 50):
+    """Get data from Qdrant by source."""
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Qdrant not available")
+
+    try:
+        results = qdrant.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="source", match=MatchValue(value=source))]
+            ),
+            limit=limit,
+            with_payload=True
+        )
+
+        items = [
+            {"id": str(p.id), "content": p.payload.get("content", ""), "metadata": p.payload}
+            for p in results[0]
+        ]
+        return {"source": source, "count": len(items), "items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/qdrant/source/{source}")
+async def clear_qdrant_source(source: str):
+    """Delete all items from Qdrant for a specific source."""
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Qdrant not available")
+
+    try:
+        # Get all IDs for this source
+        results = qdrant.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="source", match=MatchValue(value=source))]
+            ),
+            limit=10000,
+            with_payload=False
+        )
+
+        ids_to_delete = [p.id for p in results[0]]
+
+        if ids_to_delete:
+            qdrant.delete(
+                collection_name=settings.qdrant_collection,
+                points_selector=ids_to_delete
+            )
+
+        return {"status": "deleted", "source": source, "count": len(ids_to_delete)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/qdrant/item/{item_id}")
+async def delete_qdrant_item(item_id: str):
+    """Delete a specific item from Qdrant."""
+    if not qdrant:
+        raise HTTPException(status_code=503, detail="Qdrant not available")
+
+    try:
+        qdrant.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=[item_id]
+        )
+        return {"status": "deleted", "id": item_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/personalities")
