@@ -975,8 +975,47 @@ JSON:"""
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
 
+        # Check for weather first (before web search can catch it)
+        weather_triggers = ["weather", "temperature", "forecast", "how hot", "how cold", "will it rain"]
+        if any(trigger in lower_transcript for trigger in weather_triggers):
+            logger.info("Weather request detected")
+            weather = await get_weather()
+            if weather:
+                current = weather["current"]
+                forecast = weather.get("forecast", [{}])[0] if weather.get("forecast") else {}
+                response_text = f"Currently it's {current['temp']}°F and {current['condition']}. "
+                if forecast:
+                    response_text += f"Today's high is {forecast.get('high', 'N/A')}°F, low {forecast.get('low', 'N/A')}°F, with a {forecast.get('rain_chance', 0)}% chance of rain."
+            else:
+                response_text = "I couldn't get the weather right now."
+
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Check for news briefing (before web search can catch "latest news")
+        news_patterns = ["news briefing", "what's in the news", "news update", "latest news", "give me the news", "news headlines", "today's news", "whats the news", "any news"]
+        if any(pattern in lower_transcript for pattern in news_patterns):
+            logger.info("News briefing request detected")
+            news_items = await fetch_news(max_items=5)
+
+            if news_items:
+                news_text = "\n".join([f"- {item['title']} ({item['source']})" for item in news_items])
+                summary_prompt = f"""Give a brief news briefing based on these headlines. Be concise and engaging (3-4 sentences max):
+
+{news_text}"""
+                response_text = await query_ollama(summary_prompt, [], personality["prompt"])
+            else:
+                response_text = "I couldn't fetch the latest news."
+
+            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
         # Check for web search
-        search_patterns = ["search for ", "search the web for ", "look up ", "google ", "find information about ", "what is ", "who is "]
+        search_patterns = ["search for ", "search the web for ", "look up ", "google ", "find information about "]
         # Only trigger web search if it looks like a factual query
         web_search_indicators = ["search", "look up", "google", "find information", "wiki"]
         if any(pattern in lower_transcript for pattern in search_patterns):
@@ -1029,36 +1068,6 @@ Give a brief, informative response (2-3 sentences max)."""
 
                 return Response(content=response_audio, media_type="audio/wav",
                               headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
-
-        # Check for news briefing
-        news_patterns = ["news briefing", "what's in the news", "news update", "latest news", "give me the news", "news headlines", "today's news"]
-        if any(pattern in lower_transcript for pattern in news_patterns):
-            logger.info("News briefing request detected")
-            news_items = await fetch_news(max_items=5)
-
-            if news_items:
-                # Use LLM to summarize the news
-                news_text = "\n".join([f"- {item['title']} ({item['source']})" for item in news_items])
-                summary_prompt = f"""Give a brief news briefing based on these headlines. Be concise and engaging (3-4 sentences max):
-
-{news_text}"""
-
-                response_text = await query_ollama(summary_prompt, [], personality["prompt"])
-            else:
-                response_text = "I couldn't fetch the latest news. Please check your internet connection."
-
-            response_audio = await synthesize_speech(response_text, voice=personality["voice"])
-            add_to_history(session_id, transcript, response_text)
-
-            cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
-            if not await cursor.fetchone():
-                await create_conversation(session_id, "News Briefing", personality_key)
-
-            await save_message(session_id, "user", transcript)
-            await save_message(session_id, "assistant", response_text)
-
-            return Response(content=response_audio, media_type="audio/wav",
-                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
 
         # Check for listing reminders
         if any(x in lower_transcript for x in ["what reminders", "my reminders", "list reminders", "any reminders", "upcoming reminders"]):
