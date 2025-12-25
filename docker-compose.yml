@@ -56,6 +56,8 @@ services:
       # - TWILIO_ACCOUNT_SID=your_account_sid
       # - TWILIO_AUTH_TOKEN=your_auth_token
       # - TWILIO_FROM_NUMBER=+1234567890
+      # RSS News Feeds (comma-separated, optional - defaults to BBC and NYT World)
+      # - NEWS_FEEDS=https://feeds.bbci.co.uk/news/world/rss.xml,https://rss.nytimes.com/services/xml/rss/nyt/World.xml
     depends_on:
       - faster-whisper
       - piper

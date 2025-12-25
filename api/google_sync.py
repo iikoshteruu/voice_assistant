@@ -189,6 +189,50 @@ async def sync_calendar(add_to_qdrant_func, days_ahead: int = 14) -> dict:
         return {"error": str(e)}
 
 
+def get_recent_emails(max_emails: int = 20) -> list[dict]:
+    """Fetch recent emails directly from Gmail (not cached)."""
+    creds = get_credentials()
+    if not creds:
+        return []
+
+    try:
+        service = build("gmail", "v1", credentials=creds)
+
+        results = service.users().messages().list(
+            userId="me",
+            maxResults=max_emails,
+            q="is:inbox"
+        ).execute()
+
+        messages = results.get("messages", [])
+        emails = []
+
+        for msg_ref in messages:
+            msg = service.users().messages().get(
+                userId="me",
+                id=msg_ref["id"],
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date"]
+            ).execute()
+
+            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            snippet = msg.get("snippet", "")
+
+            emails.append({
+                "from": headers.get("From", "Unknown"),
+                "subject": headers.get("Subject", "No subject"),
+                "date": headers.get("Date", "Unknown"),
+                "snippet": snippet,
+                "id": msg_ref["id"]
+            })
+
+        return emails
+
+    except Exception as e:
+        logger.error(f"Gmail fetch failed: {e}")
+        return []
+
+
 async def sync_gmail(add_to_qdrant_func, max_emails: int = 200) -> dict:
     """Sync recent emails to Qdrant."""
     creds = get_credentials()

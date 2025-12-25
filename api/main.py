@@ -11,6 +11,8 @@ from typing import Optional
 
 import aiosqlite
 import httpx
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse, JSONResponse
@@ -35,7 +37,7 @@ class Settings(BaseSettings):
     piper_host: str = "piper"
     piper_port: int = 10200
     max_history: int = 20
-    session_timeout_minutes: int = 30
+    session_timeout_minutes: int = 1440  # 24 hours - persist sessions all day
     db_path: str = "/data/socrates.db"
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "socrates"
@@ -53,12 +55,18 @@ class Settings(BaseSettings):
 You engage users with curiosity and help them think deeply about their questions.
 Keep responses concise (1-3 sentences) unless more detail is requested.
 Be warm, insightful, and occasionally use gentle humor."""
+    # RSS feeds for news briefing (can be configured via environment)
+    news_feeds: str = "https://feeds.bbci.co.uk/news/world/rss.xml,https://rss.nytimes.com/services/xml/rss/nyt/World.xml"
 
 
 settings = Settings()
 http_client: Optional[httpx.AsyncClient] = None
 db: Optional[aiosqlite.Connection] = None
 qdrant: Optional[QdrantClient] = None
+scheduler: Optional[AsyncIOScheduler] = None
+
+# Store for pending reminders (for display purposes)
+pending_reminders: dict[str, dict] = {}
 
 # Personality definitions with prompts and voices
 PERSONALITIES = {
@@ -136,6 +144,15 @@ async def init_db():
             logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id TEXT PRIMARY KEY,
+            message TEXT NOT NULL,
+            remind_at TIMESTAMP NOT NULL,
+            fired BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await db.commit()
 
 
@@ -192,6 +209,44 @@ async def rag_search(query: str, top_k: int = None) -> list[dict]:
     except Exception as e:
         logger.error(f"RAG search failed: {e}")
         return []
+
+
+async def web_search(query: str, max_results: int = 5) -> list[dict]:
+    """Search the web using DuckDuckGo."""
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            return [
+                {"title": r.get("title", ""), "body": r.get("body", ""), "href": r.get("href", "")}
+                for r in results
+            ]
+    except Exception as e:
+        logger.error(f"Web search failed: {e}")
+        return []
+
+
+async def fetch_news(max_items: int = 10) -> list[dict]:
+    """Fetch news from configured RSS feeds."""
+    import feedparser
+
+    news_items = []
+    feeds = settings.news_feeds.split(",")
+
+    for feed_url in feeds:
+        try:
+            feed = feedparser.parse(feed_url.strip())
+            for entry in feed.entries[:max_items // len(feeds) + 1]:
+                news_items.append({
+                    "title": entry.get("title", ""),
+                    "summary": entry.get("summary", entry.get("description", ""))[:200],
+                    "link": entry.get("link", ""),
+                    "source": feed.feed.get("title", "Unknown")
+                })
+        except Exception as e:
+            logger.error(f"Failed to fetch RSS feed {feed_url}: {e}")
+
+    return news_items[:max_items]
 
 
 async def get_weather() -> dict:
@@ -318,13 +373,85 @@ async def add_to_qdrant(content: str, source: str, metadata: dict = None):
         logger.error(f"Failed to add to Qdrant: {e}")
 
 
+async def fire_reminder(reminder_id: str, message: str):
+    """Called when a reminder fires. Mark it as fired and log it."""
+    global db
+    try:
+        logger.info(f"Reminder fired: {message}")
+        # Mark as fired in database
+        await db.execute("UPDATE reminders SET fired = TRUE WHERE id = ?", (reminder_id,))
+        await db.commit()
+        # Remove from pending
+        pending_reminders.pop(reminder_id, None)
+        # Store the fired reminder for retrieval by the next voice interaction
+        pending_reminders[f"fired_{reminder_id}"] = {"message": message, "fired_at": datetime.now().isoformat()}
+    except Exception as e:
+        logger.error(f"Failed to fire reminder: {e}")
+
+
+async def schedule_reminder(reminder_id: str, message: str, remind_at: datetime):
+    """Schedule a reminder to fire at a specific time."""
+    global scheduler
+    if not scheduler:
+        logger.error("Scheduler not initialized")
+        return False
+
+    try:
+        # Store in pending
+        pending_reminders[reminder_id] = {"message": message, "remind_at": remind_at.isoformat()}
+
+        # Schedule the job
+        scheduler.add_job(
+            fire_reminder,
+            trigger=DateTrigger(run_date=remind_at),
+            args=[reminder_id, message],
+            id=reminder_id,
+            replace_existing=True
+        )
+        logger.info(f"Scheduled reminder '{message}' for {remind_at}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to schedule reminder: {e}")
+        return False
+
+
+async def restore_reminders():
+    """Restore pending reminders from database on startup."""
+    global db
+    try:
+        cursor = await db.execute(
+            "SELECT id, message, remind_at FROM reminders WHERE fired = FALSE AND remind_at > datetime('now')"
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            reminder_id, message, remind_at_str = row
+            remind_at = datetime.fromisoformat(remind_at_str)
+            await schedule_reminder(reminder_id, message, remind_at)
+        logger.info(f"Restored {len(rows)} pending reminders")
+    except Exception as e:
+        logger.error(f"Failed to restore reminders: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global http_client
+    global http_client, scheduler
     http_client = httpx.AsyncClient(timeout=300.0)  # 5 minute timeout
     await init_db()
     init_qdrant()
+
+    # Start the scheduler
+    scheduler = AsyncIOScheduler()
+    scheduler.start()
+    logger.info("Scheduler started")
+
+    # Restore pending reminders
+    await restore_reminders()
+
     yield
+
+    # Shutdown
+    if scheduler:
+        scheduler.shutdown()
     await http_client.aclose()
     if db:
         await db.close()
@@ -385,14 +512,77 @@ def get_or_create_session(session_id: Optional[str]) -> tuple[str, list]:
     for sid in expired:
         del sessions[sid]
 
-    if session_id and session_id in sessions:
+    # Use a default persistent session if none provided
+    # This ensures continuity across interactions
+    if not session_id:
+        session_id = "default-session"
+
+    if session_id in sessions:
         sessions[session_id]["last_access"] = now
         return session_id, sessions[session_id]["history"]
 
-    # Create new session
-    new_id = str(uuid.uuid4())
-    sessions[new_id] = {"history": [], "last_access": now}
-    return new_id, []
+    # Create new session with this ID
+    sessions[session_id] = {"history": [], "last_access": now}
+    return session_id, []
+
+
+async def get_user_memories() -> str:
+    """Load user memories and facts from Qdrant for context."""
+    if not qdrant:
+        return ""
+
+    try:
+        results = qdrant.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=Filter(
+                should=[
+                    FieldCondition(key="source", match=MatchValue(value="memory")),
+                    FieldCondition(key="source", match=MatchValue(value="user_fact"))
+                ]
+            ),
+            limit=50,
+            with_payload=True
+        )
+
+        memories = [p.payload.get("content", "") for p in results[0] if p.payload.get("content")]
+
+        if memories:
+            return "\n\nYou remember the following about the user:\n" + "\n".join([f"- {m}" for m in memories[:20]])
+        return ""
+    except Exception as e:
+        logger.error(f"Failed to load memories: {e}")
+        return ""
+
+
+async def get_pending_reminders_context() -> str:
+    """Get any pending reminders for context."""
+    try:
+        cursor = await db.execute(
+            "SELECT message, remind_at FROM reminders WHERE fired = FALSE ORDER BY remind_at LIMIT 5"
+        )
+        rows = await cursor.fetchall()
+
+        if rows:
+            now = datetime.now()
+            reminders = []
+            for msg, remind_at_str in rows:
+                remind_at = datetime.fromisoformat(remind_at_str)
+                time_diff = remind_at - now
+                if time_diff.total_seconds() > 0:
+                    if time_diff.total_seconds() < 3600:
+                        time_desc = f"in {int(time_diff.total_seconds() / 60)} minutes"
+                    elif time_diff.total_seconds() < 86400:
+                        time_desc = f"at {remind_at.strftime('%I:%M %p')}"
+                    else:
+                        time_desc = f"on {remind_at.strftime('%b %d')}"
+                    reminders.append(f"{msg} ({time_desc})")
+
+            if reminders:
+                return "\n\nThe user has these upcoming reminders:\n" + "\n".join([f"- {r}" for r in reminders])
+        return ""
+    except Exception as e:
+        logger.error(f"Failed to load reminders context: {e}")
+        return ""
 
 
 def add_to_history(session_id: str, user_msg: str, assistant_msg: str):
@@ -652,6 +842,201 @@ JSON:"""
             return Response(content=response_audio, media_type="audio/wav",
                           headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
 
+        # Step 1c-1b: Check for reminder commands
+        reminder_patterns = ["remind me to ", "remind me in ", "set a reminder ", "reminder to ", "reminder in "]
+        if any(pattern in lower_transcript for pattern in reminder_patterns):
+            logger.info("Reminder request detected")
+
+            # Use LLM to parse the reminder request
+            now = datetime.now()
+            parse_prompt = f"""Extract reminder details from this request. Current time is {now.strftime("%Y-%m-%d %H:%M")}.
+Return ONLY a JSON object with these fields (no other text):
+- message: what to remind about
+- minutes_from_now: number of minutes from now (if relative time like "in 30 minutes")
+- time: HH:MM in 24-hour format (if specific time like "at 3pm")
+- date: YYYY-MM-DD (if specific date mentioned, otherwise use today's date)
+
+Examples:
+"remind me to call mom in 30 minutes" -> {{"message": "call mom", "minutes_from_now": 30}}
+"remind me at 3pm to take medicine" -> {{"message": "take medicine", "time": "15:00", "date": "{now.strftime("%Y-%m-%d")}"}}
+"set a reminder for tomorrow at 9am to exercise" -> {{"message": "exercise", "time": "09:00", "date": "{(now + timedelta(days=1)).strftime("%Y-%m-%d")}"}}
+
+Request: {transcript}
+
+JSON:"""
+
+            try:
+                import json as json_module
+                import re
+                parsed = await query_ollama(parse_prompt, [], "You are a JSON parser. Return only valid JSON, no explanation.")
+                json_match = re.search(r'\{[^}]+\}', parsed)
+
+                if json_match:
+                    reminder_data = json_module.loads(json_match.group())
+                    message = reminder_data.get('message', 'reminder')
+
+                    # Calculate remind_at time
+                    if 'minutes_from_now' in reminder_data:
+                        minutes = int(reminder_data['minutes_from_now'])
+                        remind_at = now + timedelta(minutes=minutes)
+                    elif 'time' in reminder_data:
+                        date_str = reminder_data.get('date', now.strftime("%Y-%m-%d"))
+                        time_str = reminder_data['time']
+                        remind_at = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                        # If the time is in the past today, assume tomorrow
+                        if remind_at < now:
+                            remind_at += timedelta(days=1)
+                    else:
+                        # Default to 1 hour from now
+                        remind_at = now + timedelta(hours=1)
+
+                    # Create reminder
+                    reminder_id = str(uuid.uuid4())
+                    await db.execute(
+                        "INSERT INTO reminders (id, message, remind_at) VALUES (?, ?, ?)",
+                        (reminder_id, message, remind_at.isoformat())
+                    )
+                    await db.commit()
+
+                    # Schedule it
+                    success = await schedule_reminder(reminder_id, message, remind_at)
+
+                    if success:
+                        time_diff = remind_at - now
+                        if time_diff.total_seconds() < 3600:
+                            time_desc = f"in {int(time_diff.total_seconds() / 60)} minutes"
+                        elif time_diff.total_seconds() < 86400:
+                            time_desc = f"at {remind_at.strftime('%I:%M %p')}"
+                        else:
+                            time_desc = f"on {remind_at.strftime('%B %d at %I:%M %p')}"
+                        response_text = f"I'll remind you to {message} {time_desc}."
+                    else:
+                        response_text = "Sorry, I couldn't set that reminder."
+                else:
+                    response_text = "I couldn't understand the reminder. Try 'remind me to call mom in 30 minutes'."
+            except Exception as e:
+                logger.error(f"Reminder parse error: {e}")
+                response_text = "I had trouble with that reminder. Try 'remind me in 30 minutes to take a break'."
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Check for web search
+        search_patterns = ["search for ", "search the web for ", "look up ", "google ", "find information about ", "what is ", "who is "]
+        # Only trigger web search if it looks like a factual query
+        web_search_indicators = ["search", "look up", "google", "find information", "wiki"]
+        if any(pattern in lower_transcript for pattern in search_patterns):
+            # Check if this is clearly a web search request
+            is_web_search = any(ind in lower_transcript for ind in web_search_indicators)
+
+            # Also check if it's a factual "what is" question about something specific
+            if not is_web_search and ("what is " in lower_transcript or "who is " in lower_transcript):
+                # Avoid triggering on conversational questions
+                conversational = ["what is your", "what is my", "what is the time", "what is the weather", "what is on my"]
+                is_web_search = not any(conv in lower_transcript for conv in conversational)
+
+            if is_web_search:
+                logger.info("Web search request detected")
+                # Extract search query
+                query = transcript
+                for pattern in ["search for ", "search the web for ", "look up ", "google ", "find information about "]:
+                    if pattern in lower_transcript:
+                        query = transcript.lower().split(pattern, 1)[1].strip()
+                        break
+                for prefix in ["what is ", "who is "]:
+                    if lower_transcript.startswith(prefix):
+                        query = transcript[len(prefix):].strip()
+                        break
+
+                results = await web_search(query, max_results=3)
+                if results:
+                    # Use LLM to summarize the results
+                    results_text = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
+                    summary_prompt = f"""Based on these search results, provide a concise answer to: {query}
+
+Results:
+{results_text}
+
+Give a brief, informative response (2-3 sentences max)."""
+
+                    response_text = await query_ollama(summary_prompt, [], personality["prompt"])
+                else:
+                    response_text = f"I couldn't find any results for '{query}'. Try rephrasing your search."
+
+                response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+                add_to_history(session_id, transcript, response_text)
+
+                cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+                if not await cursor.fetchone():
+                    await create_conversation(session_id, f"Search: {query[:30]}", personality_key)
+
+                await save_message(session_id, "user", transcript)
+                await save_message(session_id, "assistant", response_text)
+
+                return Response(content=response_audio, media_type="audio/wav",
+                              headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Check for news briefing
+        news_patterns = ["news briefing", "what's in the news", "news update", "latest news", "give me the news", "news headlines", "today's news"]
+        if any(pattern in lower_transcript for pattern in news_patterns):
+            logger.info("News briefing request detected")
+            news_items = await fetch_news(max_items=5)
+
+            if news_items:
+                # Use LLM to summarize the news
+                news_text = "\n".join([f"- {item['title']} ({item['source']})" for item in news_items])
+                summary_prompt = f"""Give a brief news briefing based on these headlines. Be concise and engaging (3-4 sentences max):
+
+{news_text}"""
+
+                response_text = await query_ollama(summary_prompt, [], personality["prompt"])
+            else:
+                response_text = "I couldn't fetch the latest news. Please check your internet connection."
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+
+            cursor = await db.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+            if not await cursor.fetchone():
+                await create_conversation(session_id, "News Briefing", personality_key)
+
+            await save_message(session_id, "user", transcript)
+            await save_message(session_id, "assistant", response_text)
+
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
+        # Check for listing reminders
+        if any(x in lower_transcript for x in ["what reminders", "my reminders", "list reminders", "any reminders", "upcoming reminders"]):
+            cursor = await db.execute(
+                "SELECT message, remind_at FROM reminders WHERE fired = FALSE AND remind_at > datetime('now') ORDER BY remind_at LIMIT 5"
+            )
+            rows = await cursor.fetchall()
+
+            if rows:
+                reminder_list = []
+                now = datetime.now()
+                for msg, remind_at_str in rows:
+                    remind_at = datetime.fromisoformat(remind_at_str)
+                    time_diff = remind_at - now
+                    if time_diff.total_seconds() < 3600:
+                        time_desc = f"in {int(time_diff.total_seconds() / 60)} minutes"
+                    elif time_diff.total_seconds() < 86400:
+                        time_desc = f"at {remind_at.strftime('%I:%M %p')}"
+                    else:
+                        time_desc = f"on {remind_at.strftime('%b %d at %I:%M %p')}"
+                    reminder_list.append(f"{msg} {time_desc}")
+                response_text = f"You have {len(rows)} reminders: " + ", ".join(reminder_list)
+            else:
+                response_text = "You don't have any upcoming reminders."
+
+            response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
+            add_to_history(session_id, transcript, response_text)
+            return Response(content=response_audio, media_type="audio/wav",
+                          headers={"X-Transcript": transcript, "X-Response-Text": sanitize_header(response_text), "X-Session-Id": session_id})
+
         # Step 1c-2: Check for voice note command
         if any(x in lower_transcript for x in ["take a voice note", "save voice note", "record a note", "voice memo"]):
             # Save the audio and transcript
@@ -878,29 +1263,27 @@ Request: {transcript}"""
                 break
 
         # Step 1d: Check for email summarization
-        email_summary_triggers = ["summarize my emails", "summarize emails", "email summary", "what emails do i have", "any important emails", "read my emails"]
+        email_summary_triggers = ["summarize my emails", "summarize emails", "email summary", "what emails do i have", "any important emails", "read my emails", "check my emails", "check emails"]
         if any(trigger in lower_transcript for trigger in email_summary_triggers):
             try:
-                emails = []
-                if qdrant:
-                    results = qdrant.scroll(
-                        collection_name=settings.qdrant_collection,
-                        scroll_filter=Filter(
-                            must=[FieldCondition(key="source", match=MatchValue(value="gmail"))]
-                        ),
-                        limit=50,
-                        with_payload=True
-                    )
-                    emails = [p.payload.get("content", "") for p in results[0] if p.payload.get("content")]
+                # Fetch fresh emails directly from Gmail
+                emails = google_sync.get_recent_emails(max_emails=15)
 
                 if emails:
-                    logger.info(f"Summarizing {len(emails)} emails")
+                    logger.info(f"Fetched {len(emails)} fresh emails from Gmail")
+                    email_text = "\n".join([
+                        f"- From: {e['from']}, Subject: {e['subject']}, Preview: {e['snippet'][:100]}"
+                        for e in emails
+                    ])
                     summary_prompt = f"""Summarize these emails briefly. Highlight any urgent or important items. Group by sender or topic if helpful. Be concise (4-5 sentences max):
 
-{chr(10).join(emails[:30])}"""
+{email_text}"""
                     response_text = await query_ollama(summary_prompt, [], personality["prompt"])
                 else:
-                    response_text = "I don't have any emails synced yet. Try syncing your Gmail first."
+                    if google_sync.is_authenticated():
+                        response_text = "Your inbox appears to be empty, or I couldn't fetch emails right now."
+                    else:
+                        response_text = "I'm not connected to your Gmail. Please authenticate first."
 
                 response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
                 add_to_history(session_id, transcript, response_text)
@@ -929,15 +1312,28 @@ Request: {transcript}"""
         briefing_triggers = ["good morning", "start my day", "daily briefing", "what's on my agenda", "brief me"]
         if any(trigger in lower_transcript for trigger in briefing_triggers):
             briefing_context = await get_daily_briefing_context()
+
+            # Add reminders to briefing
+            reminders_ctx = await get_pending_reminders_context()
+            if reminders_ctx:
+                briefing_context += "\n" + reminders_ctx.replace("\n\nThe user has these upcoming reminders:", "Reminders:")
+
+            # Add user memories for personalization
+            user_memories = await get_user_memories()
+
             if briefing_context:
                 logger.info("Daily briefing triggered")
 
                 # Use LLM to create a natural briefing
-                briefing_prompt = f"""Give a friendly, concise morning briefing based on this information. Keep it conversational and under 4 sentences:
+                system_with_memory = personality["prompt"]
+                if user_memories:
+                    system_with_memory += user_memories
+
+                briefing_prompt = f"""Give a friendly, personalized morning briefing based on this information. Greet the user by name if you know it. Keep it conversational and under 5 sentences:
 
 {briefing_context}"""
 
-                response_text = await query_ollama(briefing_prompt, [], personality["prompt"])
+                response_text = await query_ollama(briefing_prompt, [], system_with_memory)
                 response_audio = await synthesize_speech_wyoming(response_text, voice=personality["voice"])
 
                 add_to_history(session_id, transcript, response_text)
@@ -992,6 +1388,17 @@ Request: {transcript}"""
         # Step 3: Query Ollama with conversation history
         try:
             system_prompt = personality["prompt"]
+
+            # Add persistent user memories
+            user_memories = await get_user_memories()
+            if user_memories:
+                system_prompt += user_memories
+
+            # Add pending reminders context
+            reminders_context = await get_pending_reminders_context()
+            if reminders_context:
+                system_prompt += reminders_context
+
             if rag_context:
                 system_prompt += rag_context
             if weather_context:
@@ -1295,6 +1702,20 @@ async def weather_endpoint():
     raise HTTPException(status_code=503, detail="Weather service unavailable")
 
 
+@app.get("/api/search")
+async def search_endpoint(q: str, limit: int = 5):
+    """Search the web using DuckDuckGo."""
+    results = await web_search(q, max_results=limit)
+    return {"query": q, "results": results}
+
+
+@app.get("/api/news")
+async def news_endpoint(limit: int = 10):
+    """Get latest news from RSS feeds."""
+    news = await fetch_news(max_items=limit)
+    return {"news": news}
+
+
 @app.get("/api/voice-notes")
 async def get_voice_notes():
     """Get list of voice notes."""
@@ -1389,6 +1810,71 @@ async def log_habit(habit: str):
     await db.execute("INSERT INTO habits (habit) VALUES (?)", (habit,))
     await db.commit()
     return {"status": "logged", "habit": habit}
+
+
+@app.get("/api/reminders")
+async def get_reminders(include_fired: bool = False):
+    """Get reminders."""
+    if include_fired:
+        cursor = await db.execute(
+            "SELECT id, message, remind_at, fired, created_at FROM reminders ORDER BY remind_at DESC LIMIT 50"
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT id, message, remind_at, fired, created_at FROM reminders WHERE fired = FALSE ORDER BY remind_at ASC"
+        )
+    rows = await cursor.fetchall()
+    return {
+        "reminders": [
+            {"id": r[0], "message": r[1], "remind_at": r[2], "fired": bool(r[3]), "created_at": r[4]}
+            for r in rows
+        ]
+    }
+
+
+@app.post("/api/reminders")
+async def create_reminder(message: str, remind_at: str):
+    """Create a reminder. remind_at should be ISO format datetime."""
+    reminder_id = str(uuid.uuid4())
+    remind_at_dt = datetime.fromisoformat(remind_at)
+
+    await db.execute(
+        "INSERT INTO reminders (id, message, remind_at) VALUES (?, ?, ?)",
+        (reminder_id, message, remind_at_dt.isoformat())
+    )
+    await db.commit()
+
+    success = await schedule_reminder(reminder_id, message, remind_at_dt)
+    return {"status": "created" if success else "db_only", "id": reminder_id, "remind_at": remind_at}
+
+
+@app.delete("/api/reminders/{reminder_id}")
+async def delete_reminder(reminder_id: str):
+    """Delete/cancel a reminder."""
+    global scheduler
+    # Remove from scheduler
+    try:
+        scheduler.remove_job(reminder_id)
+    except Exception:
+        pass  # Job might not exist
+
+    # Remove from pending
+    pending_reminders.pop(reminder_id, None)
+
+    # Mark as fired in database (or delete)
+    await db.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+    await db.commit()
+    return {"status": "deleted"}
+
+
+@app.get("/api/reminders/fired")
+async def get_fired_reminders():
+    """Get any reminders that have fired since last check (for notification)."""
+    fired = {k: v for k, v in pending_reminders.items() if k.startswith("fired_")}
+    # Clear them after reading
+    for k in list(fired.keys()):
+        pending_reminders.pop(k, None)
+    return {"fired": list(fired.values())}
 
 
 @app.get("/api/memories")

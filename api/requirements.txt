@@ -11,3 +11,6 @@ google-api-python-client==2.111.0
 google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
 twilio==8.10.0
+apscheduler==3.10.4
+duckduckgo-search==4.1.1
+feedparser==6.0.10
