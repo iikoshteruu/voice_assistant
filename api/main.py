@@ -731,7 +731,8 @@ async def synthesize_speech(text: str, voice: str = None, engine: str = None) ->
     use_engine = engine or settings.tts_engine
 
     if use_engine == "xtts":
-        return await synthesize_speech_xtts(text, speaker=voice or "default")
+        # XTTS uses WAV file speaker, ignore Piper voice names
+        return await synthesize_speech_xtts(text)
     else:
         return await synthesize_speech_wyoming(text, voice=voice)
 
