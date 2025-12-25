@@ -154,10 +154,19 @@
             box-shadow: 0 4px 25px rgba(220, 38, 38, 0.35);
         }
 
+        #recordBtn.processing {
+            background: linear-gradient(145deg, #f59e0b, #d97706);
+            box-shadow: 0 4px 25px rgba(245, 158, 11, 0.35);
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
         #recordBtn:disabled {
-            background: #d1d1d6;
             cursor: not-allowed;
-            box-shadow: none;
         }
 
         .mic-icon {
@@ -539,6 +548,7 @@
 
             setStatus('Processing...', 'processing');
             recordBtn.disabled = true;
+            recordBtn.classList.add('processing');
 
             try {
                 const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
@@ -595,6 +605,7 @@
                 setStatus('Error: ' + err.message, 'error');
             } finally {
                 recordBtn.disabled = false;
+                recordBtn.classList.remove('processing');
             }
         }
 
