@@ -710,7 +710,7 @@ async def synthesize_speech_xtts(text: str, speaker: str = "default") -> bytes:
 
         # XTTS API endpoint - requires speaker embeddings
         response = await http_client.post(
-            f"{settings.xtts_url}/tts",
+            f"{settings.xtts_url}/tts_to_audio/",
             json={
                 "text": text,
                 "speaker_embedding": xtts_speaker.get("speaker_embedding"),
