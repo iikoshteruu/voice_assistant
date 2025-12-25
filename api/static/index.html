@@ -450,7 +450,7 @@
         let mediaRecorder = null;
         let audioChunks = [];
         let isRecording = false;
-        let sessionId = null;
+        let sessionId = localStorage.getItem('sessionId') || null;
 
         // Load saved personality
         const savedPersonality = localStorage.getItem('personality');
@@ -486,6 +486,27 @@
             }
         }
         loadTtsStatus();
+
+        // Load conversation history if session exists
+        async function loadConversationHistory() {
+            if (!sessionId) return;
+            try {
+                const response = await fetch(`${getServerUrl()}/api/conversations/${sessionId}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.messages && data.messages.length > 0) {
+                        data.messages.forEach(msg => {
+                            addMessage(msg.content, msg.role);
+                        });
+                        setStatus('Previous conversation restored');
+                        setTimeout(() => setStatus('Ready - Hold button to speak'), 2000);
+                    }
+                }
+            } catch (err) {
+                console.log('Could not load conversation history');
+            }
+        }
+        loadConversationHistory();
 
         ttsEngineSelect.addEventListener('change', async () => {
             try {
@@ -616,6 +637,7 @@
                 const newSessionId = response.headers.get('X-Session-Id');
                 if (newSessionId) {
                     sessionId = newSessionId;
+                    localStorage.setItem('sessionId', sessionId);
                 }
 
                 if (transcript) {
@@ -656,6 +678,7 @@
                 });
             }
             sessionId = null;
+            localStorage.removeItem('sessionId');
             conversationEl.innerHTML = '';
             setStatus('New conversation started');
             setTimeout(() => setStatus('Ready - Hold button to speak'), 2000);
