@@ -1740,7 +1740,7 @@ async def tts_status():
     """Get current TTS engine status."""
     xtts_available = False
     try:
-        response = await http_client.get(f"{settings.xtts_url}/", timeout=5.0)
+        response = await http_client.get(f"{settings.xtts_url}/docs", timeout=5.0)
         xtts_available = response.status_code == 200
     except Exception:
         pass
